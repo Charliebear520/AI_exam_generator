@@ -1,14 +1,8 @@
 // src/App.js
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import "./App.css";
 import QuestionsList from "./components/QuestionsList";
-import {
-  uploadPdf,
-  getDownloadUrl,
-  getQuestions,
-  deleteQuestions,
-  downloadJSON,
-} from "./services/api";
+import { uploadPdf, getQuestions, downloadJSON } from "./services/api";
 
 function App() {
   const [file, setFile] = useState(null);
@@ -22,36 +16,59 @@ function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [visibleQuestions, setVisibleQuestions] = useState(10); // 默认显示10道题目
 
-  const fetchRecentQuestions = async () => {
+  const fetchRecentQuestions = useCallback(async () => {
     try {
-      const data = await getQuestions(filterExamName || null, 0, 100); // 获取更多题目
-      let filteredQuestions = data.questions.sort((a, b) => b.id - a.id); // 按題號降序
-      if (searchTerm) {
-        filteredQuestions = filteredQuestions.filter(
-          (q) =>
-            q.content.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            q.explanation.toLowerCase().includes(searchTerm.toLowerCase())
-        );
+      const data = await getQuestions(filterExamName || null, 0, 100);
+
+      // 處理新的數據格式
+      if (data.exams) {
+        // 將所有考試的題目合併成一個數組
+        let allQuestions = [];
+        data.exams.forEach((exam) => {
+          // 為每個題目添加考試名稱
+          const questionsWithExamName = exam.questions.map((q) => ({
+            ...q,
+            exam_name: exam.exam_name,
+          }));
+          allQuestions = [...allQuestions, ...questionsWithExamName];
+        });
+
+        // 按ID排序
+        let filteredQuestions = allQuestions.sort((a, b) => b.id - a.id);
+
+        // 應用搜索過濾
+        if (searchTerm) {
+          filteredQuestions = filteredQuestions.filter(
+            (q) =>
+              q.content.toLowerCase().includes(searchTerm.toLowerCase()) ||
+              q.explanation?.toLowerCase().includes(searchTerm.toLowerCase())
+          );
+        }
+
+        setRecentQuestions(filteredQuestions);
+      } else {
+        console.error("API返回的數據格式不正確:", data);
+        setRecentQuestions([]);
       }
-      setRecentQuestions(filteredQuestions); // 不限制数量
     } catch (err) {
       console.error("無法載入最近題目:", err);
+      setRecentQuestions([]);
     }
-  };
+  }, [filterExamName, searchTerm]);
+
+  useEffect(() => {
+    fetchRecentQuestions();
+    const interval = setInterval(fetchRecentQuestions, 900000);
+    return () => clearInterval(interval);
+  }, [fetchRecentQuestions]);
+
+  useEffect(() => {
+    fetchRecentQuestions();
+  }, [result, fetchRecentQuestions]);
 
   const loadMoreQuestions = () => {
     setVisibleQuestions((prev) => prev + 10); // 每次加载10道题目
   };
-
-  useEffect(() => {
-    fetchRecentQuestions();
-    const interval = setInterval(fetchRecentQuestions, 900000); // 每 900 秒輪詢
-    return () => clearInterval(interval);
-  }, [filterExamName, searchTerm]); // 當篩選或搜尋條件變化時刷新
-
-  useEffect(() => {
-    fetchRecentQuestions(); // 上傳成功後立即刷新
-  }, [result]);
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];

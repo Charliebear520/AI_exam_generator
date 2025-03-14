@@ -241,21 +241,61 @@ async def download_json(filename: str):
 async def get_questions(
     exam_name: Optional[str] = None,
     skip: int = 0, 
-    limit: int = 100,
+    limit: Optional[int] = None,  # 移除預設限制
     db: Session = Depends(get_db)
 ):
-    query = db.query(Question)
-    if exam_name:
-        query = query.filter(Question.exam_name == exam_name)
-    # 按 created_at 降序排序
-    query = query.order_by(Question.created_at.desc())
-    questions = query.offset(skip).limit(limit).all()
-    result = {
-        "exam": exam_name,
-        "questions": [q.to_dict() for q in questions],
-        "total": query.count()
-    }
-    return result
+    """
+    獲取題目列表，可以按考試名稱篩選
+    如果沒有指定考試名稱，則返回所有考試的題目統計和最新題目
+    """
+    try:
+        if exam_name:
+            # 如果指定了考試名稱，返回該考試的所有題目
+            query = db.query(Question).filter(Question.exam_name == exam_name)
+            total = query.count()
+            
+            # 只有在明確指定limit時才進行限制
+            if limit is not None:
+                query = query.offset(skip).limit(limit)
+            
+            questions = query.order_by(Question.question_number).all()
+            
+            return {
+                "exam": exam_name,
+                "questions": [q.to_dict() for q in questions],
+                "total": total
+            }
+        else:
+            # 如果沒有指定考試名稱，返回所有考試的統計資訊
+            from sqlalchemy import func
+            
+            # 獲取每個考試的題目數量
+            exam_stats = db.query(
+                Question.exam_name,
+                func.count(Question.id).label('total_questions')
+            ).group_by(Question.exam_name).all()
+            
+            # 獲取每個考試的最新題目作為預覽
+            exams_data = []
+            for exam_name, total in exam_stats:
+                latest_questions = db.query(Question).filter(
+                    Question.exam_name == exam_name
+                ).order_by(Question.question_number).all()
+                
+                exams_data.append({
+                    "exam_name": exam_name,
+                    "total_questions": total,
+                    "questions": [q.to_dict() for q in latest_questions]
+                })
+            
+            return {
+                "exams": exams_data,
+                "total_exams": len(exam_stats)
+            }
+            
+    except Exception as e:
+        print(f"獲取題目時發生錯誤: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"獲取題目時發生錯誤: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
