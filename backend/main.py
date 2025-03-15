@@ -217,7 +217,7 @@ async def delete_questions(
         
         # 刪除 vector store 中該考試的資料
         vector_store.delete_exam_questions(exam_name)
-        
+        return {"message": "刪除成功", "exam_name": exam_name}
         # 刪除 downloads 資料夾中所有考試欄位為 exam_name 的 JSON 檔案
         import json
         for filename in os.listdir(DOWNLOAD_DIR):

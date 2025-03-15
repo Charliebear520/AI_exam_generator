@@ -22,13 +22,14 @@ const ExamGenerator = () => {
       message.success("生成模擬考題成功！");
     } catch (err) {
       console.error(err);
-      message.error("生成模擬考題失敗！");
+      // 嘗試從 error.response.data.detail 讀取後端返回的完整錯誤訊息
+      const errorMsg = err.response?.data?.detail || err.message || "生成模擬考題失敗！";
+      message.error(errorMsg);
     } finally {
       setLoading(false);
     }
   };
 
-  // 用按鈕點選方式設定答案
   const handleOptionClick = (questionId, optionKey) => {
     setUserAnswers(prev => ({
       ...prev,
@@ -52,7 +53,8 @@ const ExamGenerator = () => {
       message.success("提交答案成功！");
     } catch (err) {
       console.error(err);
-      message.error("提交答案失敗！");
+      const errorMsg = err.response?.data?.detail || err.message || "提交答案失敗！";
+      message.error(errorMsg);
     } finally {
       setLoading(false);
     }
@@ -102,7 +104,7 @@ const ExamGenerator = () => {
                   </Button>
                 ))}
               </div>
-              <p style={{ fontSize: '0.8rem', color: '#888' }}>來源: {q.source}</p>
+              <p style={{ fontSize: '0.8rem', color: '#888' }}>改編: {q.source}</p>
             </div>
           ))}
           <Button type="primary" onClick={handleSubmitAnswers} loading={loading}>

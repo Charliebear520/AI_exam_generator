@@ -56,7 +56,10 @@ const UploadForm = ({ onUploadSuccess }) => {
           },
         }
       );
-
+      message.success("上傳成功！");
+      if (onUploadSuccess) {
+        onUploadSuccess(response.data);
+      }
       setFileList([]);
       setPassword("");
       setExamName("");
@@ -69,7 +72,8 @@ const UploadForm = ({ onUploadSuccess }) => {
       }
     } catch (error) {
       console.error("上传失败:", error);
-
+      // 若後端返回了錯誤訊息 detail，則顯示 detail
+      message.error(error.response?.data?.detail || "上传失败: 未知錯誤");
       // 检查是否是PDF加密错误
       if (
         error.response &&
