@@ -1,3 +1,5 @@
+import os
+import shutil
 import chromadb
 from chromadb.utils import embedding_functions
 from datetime import datetime
@@ -7,10 +9,20 @@ import random
 
 class VectorStore:
     def __init__(self):
-        # 使用新路徑，避免舊數據干擾
-        self.client = chromadb.PersistentClient(path="vector_db_new_model")
+        # 定義持久化資料目錄
+        persist_path = "vector_db_new_model"
+
+        # 修改：如果目錄不存在，則建立；否則保留舊資料
+        if not os.path.exists(persist_path):
+            os.makedirs(persist_path)
+            print(f"創建新的持久化目錄：{persist_path}")
+        else:
+            print(f"使用現有的持久化目錄：{persist_path}")
+
+        # 初始化 Chroma 客戶端
+        self.client = chromadb.PersistentClient(path=persist_path)
         self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="all-MiniLM-L6-v2"  # 確認使用新模型
+            model_name="all-MiniLM-L6-v2"  # 確認使用的新模型
         )
         self.collection = self.client.get_or_create_collection(
             name="exam_questions",
@@ -19,7 +31,7 @@ class VectorStore:
         )
 
     def add_questions(self, questions: List[Dict], exam_name: str):
-        documents = [q["content"] for q in questions]  # 只嵌入題目主體
+        documents = [q["content"] for q in questions]  # 僅嵌入題目主體
         metadatas = []
         ids = []
         for question in questions:

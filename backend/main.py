@@ -1,22 +1,26 @@
 # main.py
 import os
 import json
-from typing import List, Optional
+from typing import List, Optional,Dict,Any
 from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import uvicorn
+import random
 
 from database import get_db, engine, Base
 from models import Question
 from parse_pdf import save_to_json  # 只保留 save_to_json，其他函數不再需要
 from use_gemini import process_pdf_with_gemini
+from vector_store import vector_store
+from use_gemini import adapt_questions  # 新增的題目改編函數
+
 
 # 創建資料表
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="考試題目 OCR API", description="將 PDF 考試題目轉換為 JSON 格式")
+app = FastAPI(title="考試題目 OCR API", description="將PDF轉JSON、向量檢索與AI改編模擬考題")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -168,6 +172,9 @@ async def upload_pdf(
         try:
             json_filename = save_to_json(questions, exam_name, DOWNLOAD_DIR)
             progress.append("JSON 檔案生成完成")
+            # 添加到向量資料庫
+            vector_store.add_questions(questions, exam_name)  # 新增這一行
+            progress.append("題目已添加到向量資料庫")
         except Exception as json_error:
             print(f"生成JSON檔案錯誤: {str(json_error)}")
             raise HTTPException(status_code=500, detail=f"生成JSON檔案時發生錯誤: {str(json_error)}")
@@ -296,6 +303,88 @@ async def get_questions(
     except Exception as e:
         print(f"獲取題目時發生錯誤: {str(e)}")
         raise HTTPException(status_code=500, detail=f"獲取題目時發生錯誤: {str(e)}")
+
+# API 1: 一鍵生成模擬考題
+@app.post("/generate_exam")
+async def generate_exam(exam_name: str = Form(...), num_questions: int = Form(10)):
+    """
+    根據使用者輸入的考試名稱與題目數量生成模擬考題：
+      1. 從向量資料庫中隨機抽取原始題目（不依照考試名稱篩選）
+      2. 利用 LLM (Gemini-2.0-flash) 改編題目生成新的模擬考題
+      3. 在改編後的題目中附上使用者指定的考試名稱（僅作標記用途）
+    """
+    # 取得整個向量庫中的所有題目
+    all_questions = vector_store.collection.get()
+    num_available = len(all_questions["documents"])
+    
+    if num_available == 0:
+        raise HTTPException(status_code=404, detail="向量庫中沒有題目")
+    
+    # 如果題目數不足，則以全部題目生成模擬考題
+    if num_available < num_questions:
+        num_questions = num_available
+
+    sampled_indices = random.sample(range(num_available), num_questions)
+    original_questions = []
+    for idx in sampled_indices:
+        original_questions.append({
+            "content": all_questions["documents"][idx],
+            "metadata": all_questions["metadatas"][idx]
+        })
+
+    # 利用 LLM 改編題目生成模擬考題
+    adapted_exam = adapt_questions(original_questions)
+    
+    # 在改編後的每道題目中加入使用者指定的考試名稱（僅作為標記）
+    for q in adapted_exam:
+        q["new_exam_name"] = exam_name
+    
+    return {
+        "original_exam": original_questions,
+        "adapted_exam": adapted_exam
+    }
+
+# --------------------------------------------
+# API 2: 提交答案並評分
+@app.post("/submit_answers")
+async def submit_answers(payload: Dict[str, Any]):
+    """
+    接收使用者作答數據：
+      payload 結構：
+      {
+         "adapted_exam": [ { "id": 1, "answer": "A", "explanation": "...", ...}, ... ],
+         "answers": { "1": "A", "2": "C", ... }  # 使用者提交答案
+      }
+    對比每題正確答案，計算得分並返回每題的詳細結果及解析
+    """
+    adapted_exam = payload.get("adapted_exam", [])
+    user_answers = payload.get("answers", {})
+    if not adapted_exam:
+        raise HTTPException(status_code=400, detail="缺少改編後的考題數據")
+    
+    score = 0
+    results = []
+    for question in adapted_exam:
+        qid = str(question.get("id"))
+        correct = question.get("answer", "").strip().upper()
+        user_ans = user_answers.get(qid, "").strip().upper()
+        is_correct = (user_ans == correct)
+        if is_correct:
+            score += 1
+        results.append({
+            "question_id": qid,
+            "user_answer": user_ans,
+            "correct_answer": correct,
+            "is_correct": is_correct,
+            "explanation": question.get("explanation", ""),
+            "source_info": f" {question.get('source', '未知')} 試題"
+        })
+    
+    return {
+        "score": score,
+        "total": len(adapted_exam),
+        "results": results
+    }
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

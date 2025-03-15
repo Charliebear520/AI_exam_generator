@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import "./App.css";
 import QuestionsList from "./components/QuestionsList";
+import ExamGenerator from "./components/ExamGenerator";
 import { uploadPdf, getQuestions, downloadJSON } from "./services/api";
 
 function App() {
@@ -176,7 +177,8 @@ function App() {
               </div>
             )}
           </div>
-
+                    {/* 新增考試生成區塊 */}
+          <ExamGenerator />
           <section className="questions-section">
             <QuestionsList key={refreshKey} onRefresh={handleRefresh} />
           </section>

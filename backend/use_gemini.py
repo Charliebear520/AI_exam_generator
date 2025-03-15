@@ -1,9 +1,11 @@
 # use_gemini.py
 import os
 import json
+import random
 import re
 import tempfile
 from dotenv import load_dotenv
+from typing import List, Dict
 import google.generativeai as genai
 import io
 import traceback
@@ -295,6 +297,80 @@ def process_pdf_with_gemini(pdf_bytes, filename, password=None):
         print(error_message)
         traceback.print_exc()
         return {"error": error_message}
+def adapt_questions(questions: List[Dict]) -> List[Dict]:
+    """
+    使用 Gemini API 改編原始題目，生成全新多選題：
+      - 重新表述題目內容，前綴【改編】
+      - 生成4個選項（A、B、C、D）
+      - 產生正確答案與詳細解析
+      - 回傳格式為 JSON，符合前端需求
+    此處對每個題目都重新分配唯一的題號，並在來源中說明原始考試與題目編號。
+    """
+    adapted = []
+    try:
+        model = genai.GenerativeModel('gemini-2.0-flash')
+    except Exception as e:
+        print(f"建立 Gemini 模型失敗: {str(e)}")
+        model = None  # 將使用預設邏輯
+
+    for index, q in enumerate(questions):
+        # 取得原始metadata，並定義題號與來源資訊
+        metadata = q.get("metadata", {})
+        question_number = metadata.get("question_number", index + 1)
+        original_exam_name = metadata.get("exam_name", "未知考試")
+        source_str = f"改編自 {original_exam_name} 試題第 {question_number} 題"
+        # 重新分配唯一題號（依照循環順序）
+        new_id = index + 1
+
+        # 建立 Gemini prompt：
+        prompt = f"""
+請根據以下原始題目信息，生成一份全新的多選題，請以JSON格式返回，格式要求如下：
+{{
+  "id": {new_id},
+  "content": "【改編】重新表述的題目內容",
+  "options": {{"A": "選項A", "B": "選項B", "C": "選項C", "D": "選項D"}},
+  "answer": "正確選項字母",
+  "explanation": "【改編】詳細解析",
+  "source": "{source_str}"
+}}
+
+原始題目內容: {q.get("content", "")}
+原始選項: {json.dumps(q.get("options", {}), ensure_ascii=False)}
+原始答案: {metadata.get("answer", "")}
+原始解析: {metadata.get("explanation", "")}
+只返回符合上述格式的純JSON，無其他文字。
+"""
+        adapted_q = None
+        if model:
+            try:
+                response = model.generate_content(prompt)
+                result_text = response.text
+                # 移除可能的 markdown code block
+                import re
+                def clean_json_text(text):
+                    text = re.sub(r'```(?:json)?\s*|```', '', text).strip()
+                    match = re.search(r'({.*})', text, re.DOTALL)
+                    return match.group(1) if match else text
+                cleaned_text = clean_json_text(result_text)
+                adapted_q = json.loads(cleaned_text)
+            except Exception as e:
+                print(f"改編題目失敗: {str(e)}")
+        if not adapted_q:
+            # 使用預設邏輯
+            adapted_q = {
+                "id": new_id,
+                "content": "【改編】" + q.get("content", ""),
+                "options": q.get("options") if q.get("options") and isinstance(q.get("options"), dict) and len(q.get("options")) >= 2 
+                           else {"A": "選項 A", "B": "選項 B", "C": "選項 C", "D": "選項 D"},
+                "answer": metadata.get("answer", ""),
+                "explanation": "【改編】" + metadata.get("explanation", ""),
+                "source": source_str
+            }
+        # 確保選項有四個
+        if not adapted_q.get("options") or len(adapted_q["options"]) != 4:
+            adapted_q["options"] = {"A": "選項 A", "B": "選項 B", "C": "選項 C", "D": "選項 D"}
+        adapted.append(adapted_q)
+    return adapted
 
 if __name__ == "__main__":
     # 測試用範例
