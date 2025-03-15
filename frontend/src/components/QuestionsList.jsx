@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { getQuestions, deleteQuestions } from "../services/api";
+import { getQuestions, deleteQuestions, downloadExamJSON } from "../services/api";
+import { Button, message } from "antd";
 import "./QuestionsList.css";
 
 const QuestionsList = ({ onRefresh }) => {
@@ -11,7 +12,6 @@ const QuestionsList = ({ onRefresh }) => {
     try {
       setLoading(true);
       const data = await getQuestions();
-
       if (data.exams) {
         setExams(
           data.exams.map((exam) => ({
@@ -40,14 +40,24 @@ const QuestionsList = ({ onRefresh }) => {
     try {
       if (window.confirm(`確定要刪除 ${examName} 的所有題目嗎？`)) {
         await deleteQuestions(examName);
+        message.success("刪除成功");
         fetchQuestions();
-        if (onRefresh) {
-          onRefresh();
-        }
+        if (onRefresh) onRefresh();
       }
     } catch (err) {
       console.error("刪除考試失敗:", err);
+      message.error(err.response?.data?.detail || "刪除考試失敗");
       setError("刪除考試失敗");
+    }
+  };
+
+  const handleDownloadExam = (examName) => {
+    try {
+      // 調用 API 模組中提供的下載函式，單獨下載該筆考試的 JSON 檔案
+      downloadExamJSON(examName);
+    } catch (err) {
+      console.error("下載失敗:", err);
+      message.error("下載失敗");
     }
   };
 
@@ -61,23 +71,31 @@ const QuestionsList = ({ onRefresh }) => {
 
   return (
     <div className="exams-list">
-      <h2>考試列表</h2>
+      <h2>題庫列表</h2>
       {exams.length > 0 ? (
         <ul>
           {exams.map((exam) => (
             <li key={exam.name} className="exam-item">
               <div className="exam-info">
                 <span className="exam-name">{exam.name}</span>
-                <span className="question-count">
-                  ({exam.questionCount} 題)
-                </span>
+                <span className="question-count">({exam.questionCount} 題)</span>
               </div>
-              <button
-                onClick={() => handleDelete(exam.name)}
-                className="delete-btn"
-              >
-                刪除
-              </button>
+              <div className="exam-actions">
+                <Button 
+                  onClick={() => handleDownloadExam(exam.name)} 
+                  type="default" 
+                  style={{ marginRight: "8px" }}
+                >
+                  下載 JSON
+                </Button>
+                <Button 
+                  onClick={() => handleDelete(exam.name)} 
+                  type="primary" 
+                  danger
+                >
+                  刪除
+                </Button>
+              </div>
             </li>
           ))}
         </ul>

@@ -3,6 +3,8 @@ import "./App.css";
 import QuestionsList from "./components/QuestionsList";
 import ExamGenerator from "./components/ExamGenerator";
 import { uploadPdf, getQuestions, downloadJSON } from "./services/api";
+import { Upload, Button, message, Spin } from "antd";
+import { UploadOutlined } from "@ant-design/icons";
 
 function App() {
   const [file, setFile] = useState(null);
@@ -12,15 +14,32 @@ function App() {
   const [error, setError] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const handleFileChange = (e) => {
-    const selectedFile = e.target.files[0];
-    if (selectedFile && selectedFile.type === "application/pdf") {
-      setFile(selectedFile);
-      setError(null);
-    } else {
+  // Upload.Dragger 配置，只接受 PDF 並禁止自動上傳
+  const uploadProps = {
+    name: "file",
+    accept: ".pdf",
+    multiple: false,
+    showUploadList: true, // 顯示上傳清單
+    beforeUpload: (uploadedFile) => {
+      if (uploadedFile.type !== "application/pdf") {
+        message.error("請上傳 PDF 檔案");
+        return Upload.LIST_IGNORE;
+      }
+      // 返回 false 阻止自動上傳
+      return false;
+    },
+    onChange: (info) => {
+      // info.fileList 為當前上傳的文件清單
+      if (info.fileList.length > 0) {
+        // 取第一個文件的原始檔案
+        setFile(info.fileList[0].originFileObj);
+      } else {
+        setFile(null);
+      }
+    },
+    onRemove: () => {
       setFile(null);
-      setError("請選擇 PDF 檔案");
-    }
+    },
   };
 
   const handleExamNameChange = (e) => {
@@ -72,10 +91,10 @@ function App() {
       <main className="main-content">
         <div className="left-column">
           <div className="upload-section">
-            <h2>上傳PDF文件</h2>
+            <h2>上傳題庫</h2>
             <form onSubmit={handleSubmit}>
               <div className="form-group">
-                <label htmlFor="examName">考試名稱：</label>
+                <label htmlFor="examName">題庫名稱：</label>
                 <input
                   type="text"
                   id="examName"
@@ -86,19 +105,25 @@ function App() {
                 />
               </div>
               <div className="form-group">
-                <label htmlFor="pdfFile">PDF 檔案：</label>
-                <input
-                  type="file"
-                  id="pdfFile"
-                  onChange={handleFileChange}
-                  accept=".pdf"
-                  required
-                />
-                <small>僅支援 PDF 格式</small>
+                <Upload.Dragger {...uploadProps}>
+                  <p className="ant-upload-drag-icon">
+                    <UploadOutlined />
+                  </p>
+                  <p className="ant-upload-text">
+                    點擊或拖曳上傳 PDF 檔案
+                  </p>
+                  <p className="ant-upload-hint">僅支援 PDF 格式</p>
+                </Upload.Dragger>
               </div>
-              <button type="submit" disabled={loading} className="submit-btn">
-                {loading ? "處理中..." : "上傳並解析"}
-              </button>
+              <div className="form-group">
+                <Button
+                  type="primary"
+                  htmlType="submit"
+                  disabled={loading}
+                >
+                  {loading ? <Spin /> : "上傳並解析"}
+                </Button>
+              </div>
             </form>
 
             {error && <div className="error-message">{error}</div>}
@@ -115,7 +140,10 @@ function App() {
           </div>
 
           <section className="questions-section">
-            <QuestionsList key={refreshKey} onRefresh={() => setRefreshKey((prev) => prev + 1)} />
+            <QuestionsList
+              key={refreshKey}
+              onRefresh={() => setRefreshKey((prev) => prev + 1)}
+            />
           </section>
         </div>
 

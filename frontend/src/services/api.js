@@ -67,6 +67,13 @@ export const downloadJSON = (filename) => {
   window.open(getDownloadUrl(filename), "_blank");
 };
 
+// 新增下載指定考試的 JSON 文件函式
+export const downloadExamJSON = (examName) => {
+  // 組成檔名，例如 "111年司法官考試.json"
+  const filename = `${examName}.json`;
+  window.open(getDownloadUrl(filename), "_blank");
+};
+
 // 以下是为了兼容旧代码的别名
 export const uploadPDF = uploadPdf;
 
