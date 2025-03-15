@@ -200,41 +200,46 @@ async def delete_questions(
     db: Session = Depends(get_db)
 ):
     """
-    根據考試名稱刪除資料庫中的題目記錄
+    刪除指定考試名稱的題目：
+      1. 從資料庫中刪除該考試題目
+      2. 從 vector store 刪除該考試題目的向量
+      3. 從 downloads 資料夾中刪除所有 exam 欄位等於該考試名稱的 JSON 檔案
     """
     try:
-        # 打印接收到的考试名称，用于调试
-        print(f"收到删除请求，考试名称: '{exam_name}'")
-        
-        # 检查考试名称是否有效
-        if not exam_name or exam_name == "undefined":
-            raise HTTPException(status_code=400, detail=f"考試名稱無效: '{exam_name}'")
-        
-        # 查詢要刪除的記錄數量
+        # 檢查資料庫是否有該考試的題目
         count = db.query(Question).filter(Question.exam_name == exam_name).count()
         if count == 0:
             raise HTTPException(status_code=404, detail=f"找不到考試名稱為 '{exam_name}' 的題目")
         
-        # 執行刪除操作
+        # 從資料庫中刪除
         db.query(Question).filter(Question.exam_name == exam_name).delete()
         db.commit()
         
-        # 同時刪除對應的JSON檔案（如果存在）
-        json_filename = f"{exam_name.replace(' ', '_')}.json"
-        file_path = os.path.join(DOWNLOAD_DIR, json_filename)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            print(f"已删除文件: {file_path}")
-        else:
-            print(f"文件不存在: {file_path}")
-            
-        return {"message": f"成功刪除 {count} 道題目", "exam_name": exam_name}
+        # 刪除 vector store 中該考試的資料
+        vector_store.delete_exam_questions(exam_name)
+        
+        # 刪除 downloads 資料夾中所有考試欄位為 exam_name 的 JSON 檔案
+        import json
+        for filename in os.listdir(DOWNLOAD_DIR):
+            if filename.endswith(".json"):
+                filepath = os.path.join(DOWNLOAD_DIR, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    # 當 JSON 裡的 exam 欄位符合則刪除
+                    if data.get("exam") == exam_name:
+                        os.remove(filepath)
+                        print(f"已删除文件: {filepath}")
+                except Exception as e:
+                    print(f"處理文件 {filename} 時出錯: {str(e)}")
+        
+        return {"message": f"成功刪除 {count} 道題目，並同步更新相關 JSON 和向量庫", "exam_name": exam_name}
     
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        print(f"删除题目时发生错误: {str(e)}")
+        print(f"删除題目時發生錯誤: {str(e)}")
         raise HTTPException(status_code=500, detail=f"刪除題目時發生錯誤: {str(e)}")
 
 @app.get("/download/{filename}")
