@@ -14,7 +14,7 @@ from models import Question
 from parse_pdf import save_to_json  # 只保留 save_to_json，其他函數不再需要
 from use_gemini import process_pdf_with_gemini
 from vector_store import vector_store
-from use_gemini import adapt_questions  # 新增的題目改編函數
+from use_gemini import adapt_questions, retrieve_online_questions  # 新增的題目改編函數
 
 
 # 創建資料表
@@ -311,41 +311,54 @@ async def get_questions(
 
 # API 1: 一鍵生成模擬考題
 @app.post("/generate_exam")
-async def generate_exam(exam_name: str = Form(...), num_questions: int = Form(10)):
+async def generate_exam(
+    exam_name: str = Form(...),
+    num_questions: int = Form(10),
+    keyword: Optional[str] = Form(None)
+):
     """
     根據使用者輸入的考試名稱與題目數量生成模擬考題：
-      1. 從向量資料庫中隨機抽取原始題目（不依照考試名稱篩選）
-      2. 利用 LLM (Gemini-2.0-flash) 改編題目生成新的模擬考題
-      3. 在改編後的題目中附上使用者指定的考試名稱（僅作標記用途）
+      1. 若 keyword 有填寫：先以關鍵字進行內部向量檢索，若無結果則從網路檢索
+      2. 若 keyword 未填寫：則從整個向量資料庫隨機抽題
+      3. 利用 LLM (Gemini-2.0-flash) 改編題目生成新的模擬考題
+      4. 改編後的題目附上使用者指定的考試名稱（僅作標記用途）
     """
-    # 取得整個向量庫中的所有題目
-    all_questions = vector_store.collection.get()
-    num_available = len(all_questions["documents"])
-    
-    if num_available == 0:
-        raise HTTPException(status_code=404, detail="向量庫中沒有題目")
-    
-    # 如果題目數不足，則以全部題目生成模擬考題
-    if num_available < num_questions:
-        num_questions = num_available
-
-    sampled_indices = random.sample(range(num_available), num_questions)
-    original_questions = []
-    for idx in sampled_indices:
-        original_questions.append({
-            "content": all_questions["documents"][idx],
-            "metadata": all_questions["metadatas"][idx]
-        })
+    if keyword and keyword.strip() != "":
+        # 當有關鍵字時，先嘗試從內部題庫檢索相關題目
+        internal_questions = vector_store.search_similar_questions(query=keyword, n_results=num_questions)
+        if internal_questions and len(internal_questions) > 0:
+            selected_questions = internal_questions
+            print(f"從內部題庫檢索到 {len(selected_questions)} 道相關題目")
+        else:
+            # 內部檢索無結果，網路檢索
+            print("內部題庫無相關題目，開始從網路上檢索...")
+            selected_questions = retrieve_online_questions(keyword, num_questions)
+            if not selected_questions or len(selected_questions) == 0:
+                raise HTTPException(status_code=404, detail="無法檢索到與關鍵字相關的題目")
+    else:
+        # 無關鍵字則從整個向量庫中隨機選題
+        all_questions = vector_store.collection.get()
+        num_available = len(all_questions["documents"])
+        if num_available == 0:
+            raise HTTPException(status_code=404, detail="向量庫中沒有題目")
+        if num_available < num_questions:
+            num_questions = num_available
+        sampled_indices = random.sample(range(num_available), num_questions)
+        selected_questions = []
+        for idx in sampled_indices:
+            selected_questions.append({
+                "content": all_questions["documents"][idx],
+                "metadata": all_questions["metadatas"][idx]
+            })
 
     # 利用 LLM 改編題目生成模擬考題
-    adapted_exam = adapt_questions(original_questions)
-    
-    # 在改編後的每道題目中加入使用者指定的考試名稱（僅作為標記）
+    adapted_exam = adapt_questions(selected_questions)
+    # 在改編後的每道題目中加入使用者指定的考試名稱（僅作標記）
     for q in adapted_exam:
         q["new_exam_name"] = exam_name
-    
+
     return {
-        "original_exam": original_questions,
+        "original_exam": selected_questions,
         "adapted_exam": adapted_exam
     }
 

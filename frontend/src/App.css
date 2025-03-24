@@ -308,3 +308,32 @@ footer {
     margin-top: 2rem;
   }
 }
+
+/* 添加到現有的 CSS 文件中 */
+.header-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+}
+
+.auth-section {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+}
+
+.signin-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+  text-align: center;
+  padding: 2rem;
+}
+
+.signin-container h2 {
+  margin-bottom: 2rem;
+  color: #2c3e50;
+}

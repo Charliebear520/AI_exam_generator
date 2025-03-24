@@ -372,6 +372,54 @@ def adapt_questions(questions: List[Dict]) -> List[Dict]:
         adapted.append(adapted_q)
     return adapted
 
+def retrieve_online_questions(keyword: str, num_questions: int) -> List[Dict]:
+    """
+    當內部題庫中未找到相關題目時，
+    透過 Gemini API 生成與指定關鍵字相關的全新考試多選題，
+    每題須包含題號、題幹、4個選項、正確答案（選項字母）與詳細解析，
+    並要求返回純 JSON 格式的數據。
+    """
+    try:
+        model = genai.GenerativeModel('gemini-2.0-flash')
+    except Exception as e:
+        print(f"建立 Gemini 模型失敗: {str(e)}")
+        return []
+    
+    prompt = f"""
+請根據網路上的公開資源，生成 {num_questions} 道關於 "{keyword}" 的全新多選題，
+每題包括題號、題幹、4個選項（鍵值對形式，分別為 "A", "B", "C", "D"）、正確答案（僅為選項字母）和詳細解析。
+請以以下 JSON 格式返回，僅返回符合格式的純 JSON，不包含其他文字：
+{{
+  "questions": [
+    {{
+      "id": 1,
+      "content": "題幹內容",
+      "options": {{"A": "選項A", "B": "選項B", "C": "選項C", "D": "選項D"}},
+      "answer": "A",
+      "explanation": "解析內容"
+    }}
+  ]
+}}
+"""
+    try:
+        response = model.generate_content(prompt)
+        result_text = response.text
+        # 清除 Markdown code block 標記，提取 JSON 部分
+        import re, json
+        def clean_json_text(text):
+            text = re.sub(r'```(?:json)?\s*|```', '', text).strip()
+            match = re.search(r'({.*})', text, re.DOTALL)
+            return match.group(1) if match else text
+        cleaned_text = clean_json_text(result_text)
+        online_result = json.loads(cleaned_text)
+        if "questions" in online_result:
+            return online_result["questions"]
+        else:
+            return []
+    except Exception as e:
+        print(f"在線檢索題目失敗: {str(e)}")
+        return []
+
 if __name__ == "__main__":
     # 測試用範例
     with open("sample.pdf", "rb") as f:

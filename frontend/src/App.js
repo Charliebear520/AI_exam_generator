@@ -5,6 +5,13 @@ import ExamGenerator from "./components/ExamGenerator";
 import { uploadPdf, getQuestions, downloadJSON } from "./services/api";
 import { Upload, Button, message, Spin } from "antd";
 import { UploadOutlined } from "@ant-design/icons";
+import {
+  SignedIn,
+  SignedOut,
+  SignInButton,
+  UserButton,
+  RedirectToSignIn,
+} from "@clerk/clerk-react";
 
 function App() {
   const [file, setFile] = useState(null);
@@ -82,79 +89,90 @@ function App() {
   return (
     <div className="app-container">
       <header>
-        <h1>考試題目 PDF 轉 JSON 工具</h1>
-        <p>
-          上傳 PDF 考試試題，自動轉換為結構化 JSON 格式，作為 RAG 檢索資料來源
-        </p>
+        <div className="header-content">
+          <div className="auth-section">
+            <SignedIn>
+              <UserButton afterSignOutUrl="/" />
+            </SignedIn>
+          </div>
+          <h1>AI 生成模擬考題 工具</h1>
+          <p>上傳想要練習的考試題庫，AI 會自動解析 PDF 檔案，並生成模擬考題</p>
+        </div>
       </header>
 
-      <main className="main-content">
-        <div className="left-column">
-          <div className="upload-section">
-            <h2>上傳題庫</h2>
-            <form onSubmit={handleSubmit}>
-              <div className="form-group">
-                <label htmlFor="examName">題庫名稱：</label>
-                <input
-                  type="text"
-                  id="examName"
-                  value={examName}
-                  onChange={handleExamNameChange}
-                  placeholder="例如：111年司法官考試"
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <Upload.Dragger {...uploadProps}>
-                  <p className="ant-upload-drag-icon">
-                    <UploadOutlined />
-                  </p>
-                  <p className="ant-upload-text">
-                    點擊或拖曳上傳 PDF 檔案
-                  </p>
-                  <p className="ant-upload-hint">僅支援 PDF 格式</p>
-                </Upload.Dragger>
-              </div>
-              <div className="form-group">
-                <Button
-                  type="primary"
-                  htmlType="submit"
-                  disabled={loading}
-                >
-                  {loading ? <Spin /> : "上傳並解析"}
-                </Button>
-              </div>
-            </form>
+      <SignedIn>
+        <main className="main-content">
+          <div className="left-column">
+            <div className="upload-section">
+              <h2>上傳題庫</h2>
+              <form onSubmit={handleSubmit}>
+                <div className="form-group">
+                  <label htmlFor="examName">題庫名稱：</label>
+                  <input
+                    type="text"
+                    id="examName"
+                    value={examName}
+                    onChange={handleExamNameChange}
+                    placeholder="例如：111年司法官考試"
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <Upload.Dragger {...uploadProps}>
+                    <p className="ant-upload-drag-icon">
+                      <UploadOutlined />
+                    </p>
+                    <p className="ant-upload-text">點擊或拖曳上傳 PDF 檔案</p>
+                    <p className="ant-upload-hint">僅支援 PDF 格式</p>
+                  </Upload.Dragger>
+                </div>
+                <div className="form-group">
+                  <Button type="primary" htmlType="submit" disabled={loading}>
+                    {loading ? <Spin /> : "上傳並解析"}
+                  </Button>
+                </div>
+              </form>
 
-            {error && <div className="error-message">{error}</div>}
+              {error && <div className="error-message">{error}</div>}
 
-            {result && (
-              <div className="result-section">
-                <h2>處理結果</h2>
-                <p>成功解析 {result.questions_count} 道題目</p>
-                <button onClick={handleDownload} className="download-btn">
-                  下載 JSON 檔案
-                </button>
-              </div>
-            )}
+              {result && (
+                <div className="result-section">
+                  <h2>處理結果</h2>
+                  <p>成功解析 {result.questions_count} 道題目</p>
+                  <button onClick={handleDownload} className="download-btn">
+                    下載 JSON 檔案
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <section className="questions-section">
+              <QuestionsList
+                key={refreshKey}
+                onRefresh={() => setRefreshKey((prev) => prev + 1)}
+              />
+            </section>
           </div>
 
-          <section className="questions-section">
-            <QuestionsList
-              key={refreshKey}
-              onRefresh={() => setRefreshKey((prev) => prev + 1)}
-            />
-          </section>
-        </div>
+          <div className="right-column">
+            <ExamGenerator />
+          </div>
+        </main>
+      </SignedIn>
 
-        {/* 右側改為顯示模擬考題生成區塊 */}
-        <div className="right-column">
-          <ExamGenerator />
+      <SignedOut>
+        <div className="signin-container">
+          <h2>請先登入以使用系統</h2>
+          <SignInButton mode="modal" redirectUrl="/">
+            <Button type="primary" size="large">
+              點擊此處登入
+            </Button>
+          </SignInButton>
         </div>
-      </main>
+      </SignedOut>
 
       <footer>
-        <p>&copy; {new Date().getFullYear()} 考試題目 PDF 轉 JSON 工具</p>
+        <p>&copy; {new Date().getFullYear()} AI 生成模擬考題 工具 BY黃塏峻</p>
       </footer>
     </div>
   );
