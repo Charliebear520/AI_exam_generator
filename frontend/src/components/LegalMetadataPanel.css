@@ -1,0 +1,33 @@
+.legal-metadata-panel {
+  margin-top: 20px;
+  padding: 16px;
+  background-color: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.metadata-card {
+  min-height: 200px;
+}
+
+.metadata-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.metadata-tag {
+  cursor: pointer;
+  margin: 4px;
+  transition: all 0.3s;
+}
+
+.metadata-tag:hover {
+  transform: scale(1.05);
+}
+
+.empty-text {
+  text-align: center;
+  color: #999;
+  margin: 40px 0;
+}

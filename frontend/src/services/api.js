@@ -97,7 +97,7 @@ export const submitAnswers = async (payload) => {
   const response = await fetch(`${API_URL}/submit_answers`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
   });

@@ -1,0 +1,92 @@
+from typing import List, Dict
+
+def retrieve_online_questions(keyword: str, num_questions: int) -> List[Dict]:
+    """
+    當內部題庫中未找到相關題目時，
+    透過 Gemini API 生成與指定關鍵字相關的全新考試題目，
+    生成題目包含單選題和多選題，每題須包含：
+    - 題號、題幹、4個選項
+    - 正確答案（單選題為單一字母，多選題為逗號分隔的多個字母）
+    - 詳細解析和題目類型
+    並要求返回純 JSON 格式的數據。
+    """
+    try:
+        model = genai.GenerativeModel('gemini-2.0-flash')
+    except Exception as e:
+        print(f"建立 Gemini 模型失敗: {str(e)}")
+        return []
+    
+    prompt = f"""
+請根據網路上的公開資源，生成 {num_questions} 道關於 "{keyword}" 的全新題目。
+其中一半為單選題，一半為多選題（如總數為奇數，則單選題多一題）。
+
+每題包括：
+1. 題號
+2. 題幹
+3. 4個選項（鍵值對形式，分別為 "A", "B", "C", "D"）
+4. 正確答案（單選題為單一字母，多選題為逗號分隔的多個字母）
+5. 詳細解析
+6. 題目類型（"單選題"或"多選題"）
+
+請以以下 JSON 格式返回，僅返回符合格式的純 JSON，不包含其他文字：
+{{
+  "questions": [
+    {{
+      "id": 1,
+      "content": "題幹內容",
+      "options": {{"A": "選項A", "B": "選項B", "C": "選項C", "D": "選項D"}},
+      "answer": "A",
+      "explanation": "解析內容",
+      "type": "單選題"
+    }},
+    {{
+      "id": 2,
+      "content": "題幹內容",
+      "options": {{"A": "選項A", "B": "選項B", "C": "選項C", "D": "選項D"}},
+      "answer": "A,C",
+      "explanation": "解析內容",
+      "type": "多選題"
+    }}
+  ]
+}}
+"""
+    try:
+        response = model.generate_content(prompt)
+        result_text = response.text
+        # 清除 Markdown code block 標記，提取 JSON 部分
+        import re, json
+        def clean_json_text(text):
+            text = re.sub(r'```(?:json)?\s*|```', '', text).strip()
+            match = re.search(r'({.*})', text, re.DOTALL)
+            return match.group(1) if match else text
+        cleaned_text = clean_json_text(result_text)
+        online_result = json.loads(cleaned_text)
+        
+        # 處理返回的題目，確保題型和答案格式匹配
+        if "questions" in online_result:
+            questions = online_result["questions"]
+            for q in questions:
+                # 檢查答案與題型是否匹配
+                q_type = q.get("type", "單選題")
+                answer = q.get("answer", "")
+                
+                if q_type == "單選題" and "," in answer:
+                    # 單選題答案不應包含逗號，取第一個字母
+                    q["answer"] = answer.split(",")[0].strip()
+                    print(f"修正從網路檢索的題目 #{q['id']} 的答案格式: 從 '{answer}' 更正為 '{q['answer']}'")
+                elif q_type == "多選題" and "," not in answer and len(answer) > 1:
+                    # 多選題答案，但沒有用逗號分隔，嘗試修正格式
+                    q["answer"] = ",".join(list(answer))
+                    print(f"修正從網路檢索的題目 #{q['id']} 的答案格式: 從 '{answer}' 更正為 '{q['answer']}'")
+                
+                # 確保每題都有四個選項
+                if not q.get("options") or len(q["options"]) != 4:
+                    q["options"] = {"A": "選項 A", "B": "選項 B", "C": "選項 C", "D": "選項 D"}
+                    print(f"修正從網路檢索的題目 #{q['id']} 的選項數量")
+            
+            return questions
+        else:
+            return []
+    except Exception as e:
+        print(f"在線檢索題目失敗: {str(e)}")
+        return [] 

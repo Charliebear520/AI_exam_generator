@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState } from "react";
 import "./App.css";
 import QuestionsList from "./components/QuestionsList";
 import ExamGenerator from "./components/ExamGenerator";
-import { uploadPdf, getQuestions, downloadJSON } from "./services/api";
+import { uploadPdf, downloadJSON } from "./services/api";
 import { Upload, Button, message, Spin } from "antd";
 import { UploadOutlined } from "@ant-design/icons";
 import {
@@ -10,7 +10,6 @@ import {
   SignedOut,
   SignInButton,
   UserButton,
-  RedirectToSignIn,
 } from "@clerk/clerk-react";
 
 function App() {

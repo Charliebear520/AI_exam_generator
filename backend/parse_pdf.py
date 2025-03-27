@@ -10,19 +10,27 @@ from PIL import Image
 # 設定 pytesseract 路徑 (Windows 環境可能需要)
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+def extract_text_from_pdf(pdf_bytes: bytes, password=None) -> str:
     """將 PDF 轉換為文字"""
-    # 將 PDF 轉換為圖像
-    images = convert_from_bytes(pdf_bytes)
-    
-    # OCR 處理每個頁面並合併文字
-    full_text = ""
-    for img in images:
-        # 使用繁體中文語言包進行 OCR
-        text = pytesseract.image_to_string(img, lang='chi_tra+eng')
-        full_text += text + "\n\n"
-    
-    return full_text
+    try:
+        # 將 PDF 轉換為圖像，如果有密碼則提供密碼
+        images = convert_from_bytes(pdf_bytes, userpw=password) if password else convert_from_bytes(pdf_bytes)
+        
+        # OCR 處理每個頁面並合併文字
+        full_text = ""
+        for img in images:
+            # 使用繁體中文語言包進行 OCR
+            text = pytesseract.image_to_string(img, lang='chi_tra+eng')
+            full_text += text + "\n\n"
+        
+        return full_text
+    except Exception as e:
+        if "password" in str(e).lower() or "加密" in str(e):
+            if password:
+                raise Exception(f"提供的密碼無法解密PDF：{str(e)}")
+            else:
+                raise Exception("PDF檔案已加密，請提供密碼")
+        raise Exception(f"處理PDF時發生錯誤：{str(e)}")
 
 def parse_questions(text: str, exam_name: str) -> List[Dict[str, Any]]:
     """解析文字提取題目資料"""
@@ -78,15 +86,51 @@ def parse_questions(text: str, exam_name: str) -> List[Dict[str, Any]]:
     
     return parsed_questions
 
+class CustomJSONEncoder(json.JSONEncoder):
+    """自定義JSON編碼器，處理None值"""
+    def default(self, obj):
+        if obj is None:
+            return ""  # 將None轉換為空字符串
+        # 處理其他不可序列化的類型
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)  # 將其他不可序列化的對象轉換為字符串
+
 def save_to_json(questions: List[Dict[str, Any]], exam_name: str, output_dir: str = "downloads") -> str:
     """將解析後的問題保存為 JSON 檔案"""
     # 確保輸出目錄存在
     os.makedirs(output_dir, exist_ok=True)
     
+    # 預處理問題，確保所有值都是可序列化的，並檢查ID唯一性
+    processed_questions = []
+    seen_ids = set()
+    
+    for index, question in enumerate(questions):
+        # 檢查是否有重複ID
+        q_id = question.get("id")
+        if q_id in seen_ids:
+            # 如果ID重複，添加後綴區分
+            q_id = f"{q_id}_{index}" 
+            question["id"] = q_id
+        
+        seen_ids.add(q_id)
+        
+        processed_question = {}
+        for key, value in question.items():
+            if key == "exam_point" and value is None:
+                processed_question[key] = ""
+            elif key in ["keywords", "law_references"] and value is None:
+                processed_question[key] = []
+            else:
+                processed_question[key] = value
+        
+        processed_questions.append(processed_question)
+    
     # 創建 JSON 結構
     output_data = {
         "exam": exam_name,
-        "questions": questions
+        "questions": processed_questions
     }
     
     # 生成檔案名
@@ -97,6 +141,121 @@ def save_to_json(questions: List[Dict[str, Any]], exam_name: str, output_dir: st
     
     # 寫入 JSON 檔案
     with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, ensure_ascii=False, indent=2)
+        json.dump(output_data, f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
     
     return filename
+
+def process_pdf_with_gemini(pdf_bytes, filename, password=None):
+    """
+    處理PDF檔案並使用Gemini API解析結構化資料
+    """
+    try:
+        # 使用extract_text_from_pdf提取文字
+        extracted_text = extract_text_from_pdf(pdf_bytes, password)
+        
+        if not extracted_text or len(extracted_text) < 50:
+            return {"error": "無法從PDF中提取足夠的文字內容，請確認PDF檔案是否包含可識別的文字"}
+        
+        print(f"成功從PDF提取文字，長度: {len(extracted_text)} 字元")
+        
+        # 使用API解析文字為結構化資料
+        try:
+            # 根據當前設定使用合適的API
+            if config.USE_GEMINI_API:
+                from use_gemini import process_text_with_gemini
+                result = process_text_with_gemini(extracted_text, filename)
+            else:
+                from use_openai import process_text_with_openai
+                result = process_text_with_openai(extracted_text, filename)
+                
+            # 檢查是否有警告信息
+            if isinstance(result, dict) and "warning" in result:
+                warning_message = result["warning"]
+                questions = result.get("questions", [])
+                
+                if len(questions) > 0:
+                    # 有部分成功結果
+                    return {
+                        "questions": questions,
+                        "warning": warning_message,
+                        "quota_exceeded": "quota" in warning_message.lower() or "配額" in warning_message
+                    }
+                else:
+                    # 完全失敗
+                    return {"error": warning_message}
+                
+            # 正常情況，返回完整結果
+            return {"questions": result}
+            
+        except Exception as api_error:
+            error_message = str(api_error)
+            print(f"API處理文字時出錯: {error_message}")
+            
+            # 檢查是否是配額限制錯誤
+            if "429" in error_message or "quota" in error_message.lower() or "配額" in error_message:
+                # 如果API配額已超出，嘗試切換到另一個API
+                print("檢測到API配額限制，嘗試切換到另一個API...")
+                
+                # 切換API
+                config.USE_GEMINI_API = not config.USE_GEMINI_API
+                
+                try:
+                    # 使用另一個API重試
+                    if config.USE_GEMINI_API:
+                        from use_gemini import process_text_with_gemini
+                        result = process_text_with_gemini(extracted_text, filename)
+                    else:
+                        from use_openai import process_text_with_openai
+                        result = process_text_with_openai(extracted_text, filename)
+                    
+                    # 如果返回的是帶有警告的部分結果
+                    if isinstance(result, dict) and "warning" in result:
+                        return {
+                            "questions": result.get("questions", []),
+                            "warning": f"已切換到{'Gemini' if config.USE_GEMINI_API else 'OpenAI'} API，但是: {result['warning']}",
+                            "quota_exceeded": True
+                        }
+                    
+                    # 如果成功切換且完全處理
+                    return {
+                        "questions": result,
+                        "warning": f"已切換到{'Gemini' if config.USE_GEMINI_API else 'OpenAI'} API處理"
+                    }
+                    
+                except Exception as retry_error:
+                    error_msg = str(retry_error)
+                    print(f"切換API後仍然失敗: {error_msg}")
+                    
+                    # 檢查結果中是否包含部分成功的結果
+                    if hasattr(retry_error, 'partial_results') and retry_error.partial_results:
+                        return {
+                            "questions": retry_error.partial_results,
+                            "error": f"API處理失敗: {error_msg}",
+                            "warning": "返回部分處理的結果，可能不完整",
+                            "quota_exceeded": True
+                        }
+                    
+                    return {"error": f"所有API都遇到配額限制或處理錯誤: {error_msg}"}
+            
+            # 如果API錯誤帶有部分結果
+            if hasattr(api_error, 'partial_results') and api_error.partial_results:
+                return {
+                    "questions": api_error.partial_results,
+                    "error": f"API處理失敗: {error_message}",
+                    "warning": "返回部分處理的結果，可能不完整"
+                }
+            
+            return {"error": f"API處理失敗: {error_message}"}
+    
+    except Exception as e:
+        error_message = str(e)
+        print(f"處理PDF時發生錯誤: {error_message}")
+        
+        # 檢查是否是加密PDF錯誤
+        if "加密" in error_message or "password" in error_message.lower():
+            if not password:
+                return {"error": "PDF檔案已加密，請提供密碼"}
+            else:
+                return {"error": "無法使用提供的密碼解密PDF，請確認密碼是否正確"}
+        
+        return {"error": f"處理PDF時發生錯誤: {error_message}"}

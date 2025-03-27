@@ -33,131 +33,110 @@ DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 @app.post("/upload")
-async def upload_pdf(
-    file: UploadFile = File(...), 
+async def handleUploadPDF(
+    file: UploadFile = File(...),
     exam_name: str = Form(...),
     password: str = Form(None),
     db: Session = Depends(get_db)
 ):
     """
-    上傳 PDF 檔案，使用 Gemini API 轉換為結構化 JSON，並儲存到資料庫與檔案中。
+    處理上傳的 PDF 檔案:
+    1. 提取文字
+    2. 使用 Gemini API 解析、結構化題目
+    3. 向量化並保存到向量資料庫
     """
-    progress = []
-    
-    # 檢查是否有上傳檔案
-    if not file:
-        raise HTTPException(status_code=400, detail="未收到上傳的檔案")
-    
-    # 檢查檔案名稱
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="檔案名稱無效")
-    
-    # 清理檔案名稱
-    def clean_filename(filename):
-        # 移除特殊字符
-        special_chars = '【】()（）、，。：:!！?？'
-        clean_name = filename
-        for char in special_chars:
-            clean_name = clean_name.replace(char, '')
-        # 替換空格
-        clean_name = clean_name.replace(' ', '_')
-        return clean_name
-    
-    original_filename = file.filename
-    cleaned_filename = clean_filename(original_filename)
-    print(f"原始檔案名稱: {original_filename}")
-    print(f"處理後檔案名稱: {cleaned_filename}")
-    
-    # 檢查檔案類型
-    if not original_filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail=f"不支援的檔案類型: {original_filename}。只接受 PDF 檔案")
-    
-    # 檢查考試名稱
-    if not exam_name or exam_name.strip() == "":
-        raise HTTPException(status_code=400, detail="考試名稱不能為空")
-    
     try:
-        progress.append("開始接收 PDF 檔案")
-        pdf_bytes = await file.read()
+        # 獲取檔案內容
+        content = await file.read()
+        filename = file.filename
         
-        # 檢查檔案是否為空
-        if not pdf_bytes:
-            raise HTTPException(status_code=400, detail="檔案內容為空")
+        # 記錄處理過程
+        progress = []
+        progress.append(f"原始檔案名稱: {filename}")
+        progress.append(f"處理後檔案名稱: {filename}")
+        progress.append(f"檔案大小: {len(content)/1024/1024:.1f}MB")
         
-        # 檢查檔案大小
-        file_size_mb = len(pdf_bytes) / (1024 * 1024)
-        print(f"檔案大小: {file_size_mb:.1f}MB")
-        
-        MAX_FILE_SIZE_MB = 20  # 增加到20MB
-        if file_size_mb > MAX_FILE_SIZE_MB:
-            raise HTTPException(
-                status_code=400, 
-                detail={
-                    "message": f"PDF檔案太大 ({file_size_mb:.1f}MB)",
-                    "current_size": f"{file_size_mb:.1f}MB",
-                    "max_size": f"{MAX_FILE_SIZE_MB}MB",
-                    "suggestion": "請嘗試壓縮PDF檔案大小，或分割成多個較小的檔案"
-                }
-            )
-        elif file_size_mb == 0:
-            raise HTTPException(status_code=400, detail="檔案大小為0，請確認檔案是否正確")
-        
-        progress.append(f"PDF 檔案接收完成 (大小: {file_size_mb:.1f}MB)")
-        
-        # 使用 Gemini API 處理 PDF
-        gemini_result = process_pdf_with_gemini(pdf_bytes, cleaned_filename, password)
+        # 處理 PDF
+        result = process_pdf_with_gemini(content, filename, password)
         
         # 檢查是否有錯誤
-        if "error" in gemini_result:
-            error_message = gemini_result["error"]
-            print(f"Gemini API 處理失敗: {error_message}")
-            if "已加密" in error_message and not password:
-                raise HTTPException(status_code=422, detail=error_message)
-            raise HTTPException(status_code=500, detail=error_message)
+        if "error" in result:
+            error_msg = result["error"]
+            
+            # 如果是配額錯誤但有部分題目已處理成功
+            if "quota_exceeded" in result and result.get("questions"):
+                questions = result["questions"]
+                progress.append(f"由於API配額限制，僅成功提取了 {len(questions)} 道題目")
+                # 繼續處理已提取的題目
+            else:
+                # 如果是其他錯誤或沒有提取到任何題目
+                print(f"Gemini API 處理失敗: {error_msg}")
+                raise HTTPException(status_code=500, detail=f"處理PDF時發生錯誤: {error_msg}")
         
-        if gemini_result and "questions" in gemini_result:
-            questions = gemini_result["questions"]
-            progress.append("Gemini API 結構化處理完成")
-        else:
-            print(f"Gemini API 返回的結果格式不正確: {gemini_result}")
-            raise HTTPException(status_code=422, detail="Gemini API 未返回有效結果")
+        questions = result["questions"]
         
-        if not questions:
-            raise HTTPException(status_code=422, detail="無法從 PDF 中識別題目格式")
-        
-        progress.append(f"共解析出 {len(questions)} 道題目，開始儲存至資料庫")
-        
-        # 儲存到資料庫
-        try:
-            for question in questions:
-                # 驗證題目資料
-                if not isinstance(question, dict):
-                    print(f"跳過無效題目資料: {question}")
-                    continue
-                
-                # 確保必要欄位存在
-                question_id = question.get("id", 0)
-                if not question_id:
-                    question_id = questions.index(question) + 1
-                
-                content = question.get("content", "")
-                if not content:
-                    print(f"題目 {question_id} 缺少內容，跳過")
-                    continue
-                
+        # 檢查警告
+        if "warning" in result:
+            progress.append(f"警告: {result['warning']}")
+            
+        # 確保所有數據格式正確，特別是JSON相關字段
+        for question in questions:
+            # 處理選項缺失或格式不正確的情況
+            if "options" not in question or question["options"] is None or not isinstance(question["options"], dict):
+                question_number = question.get("id", "未知")
+                print(f"題目 {question_number} 缺少選項或選項格式不正確，使用空選項")
+                question["options"] = {}
+            
+            # 確保其他JSON字段不為None
+            if question.get("keywords") is None:
+                question["keywords"] = []
+            if question.get("law_references") is None:
+                question["law_references"] = []
+            if question.get("exam_point") is None:
+                question["exam_point"] = ""
+            if question.get("type") is None:
+                # 根據選項數量和答案格式推斷題目類型
                 options = question.get("options", {})
-                if not options or not isinstance(options, dict):
-                    print(f"題目 {question_id} 缺少選項或選項格式不正確，使用空選項")
-                    options = {}
+                answer = question.get("answer", "")
                 
-                # 建立題目記錄，允許answer和explanation為空
+                if len(options) == 0:
+                    # 沒有選項，可能是簡答題或申論題
+                    question["type"] = "簡答題"
+                elif "," in answer:
+                    # 多個答案，可能是多選題
+                    question["type"] = "多選題"
+                else:
+                    # 默認為單選題
+                    question["type"] = "單選題"
+                
+                progress.append(f"為題目 {question.get('id', '未知')} 自動設置題型: {question['type']}")
+                
+        # 檢查是否有重複ID，並做相應處理
+        seen_ids = set()
+        duplicate_count = 0
+        for q in questions:
+            if q["id"] in seen_ids:
+                duplicate_count += 1
+            seen_ids.add(q["id"])
+        
+        if duplicate_count > 0:
+            progress.append(f"檢測到 {duplicate_count} 個重複ID，已自動處理以確保ID唯一性")
+        
+        # 存儲到數據庫
+        try:
+            # 將題目保存到 PostgreSQL
+            for question in questions:
                 db_question = Question(
                     exam_name=exam_name,
-                    question_number=question_id,
-                    content=content,
-                    options=options,
-                    answer=question.get("answer") if question.get("answer") is not None else "",  # 確保不是None
-                    explanation=question.get("explanation") if question.get("explanation") is not None else ""  # 確保不是None
+                    question_number=question["id"],
+                    content=question["content"],
+                    options=question["options"],
+                    answer=question.get("answer", ""),
+                    explanation=question.get("explanation", ""),
+                    exam_point=question.get("exam_point", ""),
+                    keywords=question.get("keywords", []),
+                    law_references=question.get("law_references", []),
+                    type=question.get("type", "單選題")
                 )
                 db.add(db_question)
             
@@ -173,7 +152,7 @@ async def upload_pdf(
             json_filename = save_to_json(questions, exam_name, DOWNLOAD_DIR)
             progress.append("JSON 檔案生成完成")
             # 添加到向量資料庫
-            vector_store.add_questions(questions, exam_name)  # 新增這一行
+            vector_store.add_questions(questions, exam_name)
             progress.append("題目已添加到向量資料庫")
         except Exception as json_error:
             print(f"生成JSON檔案錯誤: {str(json_error)}")
@@ -314,20 +293,38 @@ async def get_questions(
 async def generate_exam(
     exam_name: str = Form(...),
     num_questions: int = Form(10),
-    keyword: Optional[str] = Form(None)
+    keyword: Optional[str] = Form(None),
+    question_type: Optional[str] = Form(None)  # 新增題型參數
 ):
     """
     根據使用者輸入的考試名稱與題目數量生成模擬考題：
       1. 若 keyword 有填寫：先以關鍵字進行內部向量檢索，若無結果則從網路檢索
       2. 若 keyword 未填寫：則從整個向量資料庫隨機抽題
-      3. 利用 LLM (Gemini-2.0-flash) 改編題目生成新的模擬考題
-      4. 改編後的題目附上使用者指定的考試名稱（僅作標記用途）
+      3. 可選擇指定題型(單選題/多選題/簡答題等)
+      4. 利用 LLM (Gemini-2.0-flash) 改編題目生成新的模擬考題
+      5. 改編後的題目附上使用者指定的考試名稱（僅作標記用途）
     """
+    print(f"生成模擬考題: 考試={exam_name}, 數量={num_questions}, 關鍵字={keyword}, 題型={question_type}")
+    
     if keyword and keyword.strip() != "":
         # 當有關鍵字時，先嘗試從內部題庫檢索相關題目
-        internal_questions = vector_store.search_similar_questions(query=keyword, n_results=num_questions)
-        if internal_questions and len(internal_questions) > 0:
+        if question_type:
+            # 先檢索特定題型
+            internal_questions = vector_store.search_by_question_type(question_type, n_results=num_questions*2)
+            # 再從結果中進一步篩選包含關鍵字的題目
+            filtered_questions = []
+            for q in internal_questions:
+                if keyword.lower() in q["content"].lower():
+                    filtered_questions.append(q)
+                if len(filtered_questions) >= num_questions:
+                    break
+            selected_questions = filtered_questions if filtered_questions else internal_questions
+        else:
+            # 僅按關鍵字檢索
+            internal_questions = vector_store.search_similar_questions(query=keyword, n_results=num_questions)
             selected_questions = internal_questions
+            
+        if selected_questions and len(selected_questions) > 0:
             print(f"從內部題庫檢索到 {len(selected_questions)} 道相關題目")
         else:
             # 內部檢索無結果，網路檢索
@@ -336,20 +333,28 @@ async def generate_exam(
             if not selected_questions or len(selected_questions) == 0:
                 raise HTTPException(status_code=404, detail="無法檢索到與關鍵字相關的題目")
     else:
-        # 無關鍵字則從整個向量庫中隨機選題
-        all_questions = vector_store.collection.get()
-        num_available = len(all_questions["documents"])
-        if num_available == 0:
-            raise HTTPException(status_code=404, detail="向量庫中沒有題目")
-        if num_available < num_questions:
-            num_questions = num_available
-        sampled_indices = random.sample(range(num_available), num_questions)
-        selected_questions = []
-        for idx in sampled_indices:
-            selected_questions.append({
-                "content": all_questions["documents"][idx],
-                "metadata": all_questions["metadatas"][idx]
-            })
+        # 無關鍵字則從整個向量庫中選題
+        if question_type:
+            # 指定了題型，使用題型搜索
+            selected_questions = vector_store.search_by_question_type(question_type, n_results=num_questions)
+            if not selected_questions or len(selected_questions) == 0:
+                raise HTTPException(status_code=404, detail=f"向量庫中沒有 {question_type} 類型的題目")
+            print(f"從向量庫中按題型 '{question_type}' 檢索到 {len(selected_questions)} 道題目")
+        else:
+            # 沒有指定關鍵字和題型，隨機抽題
+            all_questions = vector_store.collection.get()
+            num_available = len(all_questions["documents"])
+            if num_available == 0:
+                raise HTTPException(status_code=404, detail="向量庫中沒有題目")
+            if num_available < num_questions:
+                num_questions = num_available
+            sampled_indices = random.sample(range(num_available), num_questions)
+            selected_questions = []
+            for idx in sampled_indices:
+                selected_questions.append({
+                    "content": all_questions["documents"][idx],
+                    "metadata": all_questions["metadatas"][idx]
+                })
 
     # 利用 LLM 改編題目生成模擬考題
     adapted_exam = adapt_questions(selected_questions)
@@ -367,10 +372,10 @@ async def generate_exam(
 @app.post("/submit_answers")
 async def submit_answers(payload: Dict[str, Any]):
     """
-    接收使用者作答數據：
+    接收使用者作答數據並評分：
       payload 結構：
       {
-         "adapted_exam": [ { "id": 1, "answer": "A", "explanation": "...", ...}, ... ],
+         "adapted_exam": [ { "id": 1, "answer": "A", "explanation": "...", "type": "單選題", ...}, ... ],
          "answers": { "1": "A", "2": "C", ... }  # 使用者提交答案
       }
     對比每題正確答案，計算得分並返回每題的詳細結果及解析
@@ -384,18 +389,38 @@ async def submit_answers(payload: Dict[str, Any]):
     results = []
     for question in adapted_exam:
         qid = str(question.get("id"))
-        correct = question.get("answer", "").strip().upper()
+        correct_answer = question.get("answer", "").strip().upper()
         user_ans = user_answers.get(qid, "").strip().upper()
-        is_correct = (user_ans == correct)
+        q_type = question.get("type", "單選題")
+        
+        # 根據題目類型進行不同的答案比對
+        is_correct = False
+        if q_type == "單選題":
+            # 單選題比對
+            is_correct = (user_ans == correct_answer)
+        elif q_type == "多選題":
+            # 多選題比對（需要嚴格匹配所有選項）
+            correct_options = set(correct_answer.split(","))
+            user_options = set(user_ans.split(","))
+            is_correct = (correct_options == user_options)
+        else:
+            # 其他題型
+            is_correct = (user_ans == correct_answer)
+            
         if is_correct:
             score += 1
+            
         results.append({
             "question_id": qid,
             "user_answer": user_ans,
-            "correct_answer": correct,
+            "correct_answer": correct_answer,
             "is_correct": is_correct,
             "explanation": question.get("explanation", ""),
-            "source_info": f" {question.get('source', '未知')} 試題"
+            "type": q_type,
+            "source_info": f" {question.get('source', '未知')} 試題",
+            "exam_point": question.get("exam_point", ""),
+            "keywords": question.get("keywords", []),
+            "law_references": question.get("law_references", [])
         })
     
     return {
@@ -403,6 +428,313 @@ async def submit_answers(payload: Dict[str, Any]):
         "total": len(adapted_exam),
         "results": results
     }
+
+@app.get("/legal/search")
+async def search_legal_questions(
+    query: str,
+    search_type: str = "semantic",  # semantic, keyword, exam_point, law_reference, question_type
+    n_results: int = 10,
+    include_context: bool = False  # 是否包含題目相關上下文信息
+):
+    """
+    專業法律搜索API，支持語義搜索、關鍵字搜索、考點搜索、法條搜索和題型搜索
+    
+    Args:
+        query: 搜索關鍵詞
+        search_type: 搜索類型（semantic=語義搜索, keyword=關鍵字搜索, 
+                  exam_point=考點搜索, law_reference=法條搜索, question_type=題型搜索）
+        n_results: 返回結果數量
+        include_context: 是否包含相關上下文信息（如相似的題目）
+    """
+    try:
+        print(f"執行搜索: 類型={search_type}, 查詢詞='{query}', 結果數量={n_results}")
+        
+        if search_type == "semantic":
+            # 語義搜索
+            results = vector_store.search_similar_questions(query, n_results)
+        elif search_type == "keyword":
+            # 關鍵字搜索
+            results = vector_store.search_by_keyword(query, n_results)
+        elif search_type == "exam_point":
+            # 考點搜索
+            results = vector_store.search_by_exam_point(query, n_results)
+        elif search_type == "law_reference":
+            # 法條搜索
+            results = vector_store.search_by_law_reference(query, n_results)
+        elif search_type == "question_type":
+            # 題型搜索
+            results = vector_store.search_by_question_type(query, n_results)
+        else:
+            raise HTTPException(status_code=400, detail="無效的搜索類型")
+        
+        # 處理返回結果，確保法律元數據正確顯示
+        formatted_results = []
+        for result in results:
+            metadata = result["metadata"]
+            
+            # 解析JSON字符串為Python對象
+            try:
+                if isinstance(metadata.get("keywords"), str):
+                    metadata["keywords"] = json.loads(metadata["keywords"])
+                if isinstance(metadata.get("law_references"), str):
+                    metadata["law_references"] = json.loads(metadata["law_references"])
+                if isinstance(metadata.get("options"), str):
+                    metadata["options"] = json.loads(metadata["options"])
+            except:
+                # 如果解析失敗，確保字段有默認值
+                if "keywords" not in metadata or metadata["keywords"] is None:
+                    metadata["keywords"] = []
+                if "law_references" not in metadata or metadata["law_references"] is None:
+                    metadata["law_references"] = []
+                if "options" not in metadata or metadata["options"] is None:
+                    metadata["options"] = {}
+                
+            formatted_result = {
+                "content": result["content"],
+                "metadata": metadata,
+                "distance": result.get("distance", 0)
+            }
+            
+            # 如果請求包含上下文，找到與該題目相關的其他題目
+            if include_context:
+                # 使用題目內容進行語義搜索，找到相似題目
+                similar_content = result["content"]
+                if "exam_point" in metadata and metadata["exam_point"]:
+                    similar_content += f" 考點: {metadata['exam_point']}"
+                    
+                context_results = vector_store.search_similar_questions(
+                    query=similar_content, 
+                    n_results=3  # 限制上下文結果數量
+                )
+                
+                # 過濾掉原題目
+                context_items = []
+                current_id = metadata.get("id")
+                for ctx in context_results:
+                    ctx_id = ctx["metadata"].get("id")
+                    if ctx_id != current_id:  # 排除當前題目
+                        context_items.append({
+                            "content": ctx["content"],
+                            "metadata": ctx["metadata"],
+                            "distance": ctx.get("distance", 0)
+                        })
+                
+                formatted_result["related_questions"] = context_items
+            
+            formatted_results.append(formatted_result)
+        
+        return {
+            "results": formatted_results, 
+            "total": len(formatted_results),
+            "search_info": {
+                "type": search_type,
+                "query": query,
+                "include_context": include_context
+            }
+        }
+    
+    except Exception as e:
+        print(f"搜索法律題目時發生錯誤: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"搜索法律題目時發生錯誤: {str(e)}")
+
+# 還要更新 /vector-search 端點以支持新增的法律元數據字段
+@app.get("/vector-search")
+async def vector_search(query: str, n_results: int = 5):
+    """
+    使用向量檢索搜索相似題目
+    """
+    try:
+        results = vector_store.search_similar_questions(query, n_results)
+        
+        # 處理結果，確保法律元數據正確顯示
+        formatted_results = []
+        for result in results:
+            metadata = result["metadata"]
+            
+            # 解析JSON字符串為Python對象
+            try:
+                if isinstance(metadata.get("keywords"), str):
+                    metadata["keywords"] = json.loads(metadata["keywords"])
+                if isinstance(metadata.get("law_references"), str):
+                    metadata["law_references"] = json.loads(metadata["law_references"])
+                if isinstance(metadata.get("options"), str):
+                    metadata["options"] = json.loads(metadata["options"])
+            except:
+                pass  # 如果解析失敗，保持原樣
+                
+            formatted_results.append({
+                "content": result["content"],
+                "metadata": metadata,
+                "distance": result.get("distance", 0)
+            })
+        
+        return {"results": formatted_results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"向量搜索失敗: {str(e)}")
+
+@app.get("/legal/exam_points")
+async def get_all_exam_points():
+    """
+    獲取所有可用的考點列表
+    """
+    try:
+        all_questions = vector_store.collection.get()
+        if not all_questions or "metadatas" not in all_questions:
+            return {"exam_points": [], "total": 0}
+            
+        # 提取所有考點並去重
+        exam_points = set()
+        for metadata in all_questions["metadatas"]:
+            exam_point = metadata.get("exam_point", "")
+            if exam_point and len(exam_point) > 0:
+                exam_points.add(exam_point)
+        
+        # 將集合轉為列表並排序
+        sorted_exam_points = sorted(list(exam_points))
+        
+        return {
+            "exam_points": sorted_exam_points,
+            "total": len(sorted_exam_points)
+        }
+    except Exception as e:
+        print(f"獲取考點列表時發生錯誤: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"獲取考點列表時發生錯誤: {str(e)}")
+
+@app.get("/legal/law_references")
+async def get_all_law_references():
+    """
+    獲取所有可用的法條參考列表
+    """
+    try:
+        all_questions = vector_store.collection.get()
+        if not all_questions or "metadatas" not in all_questions:
+            return {"law_references": [], "total": 0}
+            
+        # 提取所有法條並去重
+        law_refs = set()
+        for metadata in all_questions["metadatas"]:
+            try:
+                refs = json.loads(metadata.get("law_references", "[]"))
+                if isinstance(refs, list):
+                    for ref in refs:
+                        if ref and len(ref) > 0:
+                            law_refs.add(ref)
+            except:
+                continue
+        
+        # 將集合轉為列表並排序
+        sorted_law_refs = sorted(list(law_refs))
+        
+        return {
+            "law_references": sorted_law_refs,
+            "total": len(sorted_law_refs)
+        }
+    except Exception as e:
+        print(f"獲取法條列表時發生錯誤: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"獲取法條列表時發生錯誤: {str(e)}")
+
+@app.get("/legal/keywords")
+async def get_all_keywords():
+    """
+    獲取所有可用的關鍵字列表
+    """
+    try:
+        all_questions = vector_store.collection.get()
+        if not all_questions or "metadatas" not in all_questions:
+            return {"keywords": [], "total": 0}
+            
+        # 提取所有關鍵字並去重
+        all_keywords = set()
+        for metadata in all_questions["metadatas"]:
+            try:
+                keywords = json.loads(metadata.get("keywords", "[]"))
+                if isinstance(keywords, list):
+                    for kw in keywords:
+                        if kw and len(kw) > 0:
+                            all_keywords.add(kw)
+            except:
+                continue
+        
+        # 將集合轉為列表並排序
+        sorted_keywords = sorted(list(all_keywords))
+        
+        return {
+            "keywords": sorted_keywords,
+            "total": len(sorted_keywords)
+        }
+    except Exception as e:
+        print(f"獲取關鍵字列表時發生錯誤: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"獲取關鍵字列表時發生錯誤: {str(e)}")
+
+@app.get("/legal/question_types")
+async def get_all_question_types():
+    """
+    獲取所有可用的題目類型列表
+    """
+    try:
+        question_types = vector_store.get_all_question_types()
+        
+        return {
+            "question_types": question_types,
+            "total": len(question_types)
+        }
+    except Exception as e:
+        print(f"獲取題目類型列表時發生錯誤: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"獲取題目類型列表時發生錯誤: {str(e)}")
+
+@app.get("/legal/questions_by_type/{question_type}")
+async def get_questions_by_type(
+    question_type: str,
+    limit: int = 10
+):
+    """
+    獲取指定類型的題目
+    
+    Args:
+        question_type: 題目類型（如：單選題、多選題、簡答題等）
+        limit: 返回結果數量
+    """
+    try:
+        results = vector_store.search_by_question_type(question_type, limit)
+        
+        # 處理返回結果，確保數據正確顯示
+        formatted_results = []
+        for result in results:
+            metadata = result["metadata"]
+            
+            # 解析JSON字符串為Python對象
+            try:
+                if isinstance(metadata.get("keywords"), str):
+                    metadata["keywords"] = json.loads(metadata["keywords"])
+                if isinstance(metadata.get("law_references"), str):
+                    metadata["law_references"] = json.loads(metadata["law_references"])
+                if isinstance(metadata.get("options"), str):
+                    metadata["options"] = json.loads(metadata["options"])
+            except:
+                # 如果解析失敗，確保字段有默認值
+                if "keywords" not in metadata or metadata["keywords"] is None:
+                    metadata["keywords"] = []
+                if "law_references" not in metadata or metadata["law_references"] is None:
+                    metadata["law_references"] = []
+                if "options" not in metadata or metadata["options"] is None:
+                    metadata["options"] = {}
+                
+            formatted_results.append({
+                "content": result["content"],
+                "metadata": metadata,
+                "distance": result.get("distance", 0)
+            })
+        
+        return {
+            "question_type": question_type,
+            "results": formatted_results,
+            "total": len(formatted_results)
+        }
+    except Exception as e:
+        print(f"獲取{question_type}題目時發生錯誤: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"獲取{question_type}題目時發生錯誤: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
