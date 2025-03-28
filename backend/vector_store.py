@@ -7,6 +7,171 @@ import json
 from typing import List, Dict
 import random
 import uuid
+import google.generativeai as genai
+from dotenv import load_dotenv
+import numpy as np
+
+# 載入環境變數
+load_dotenv()
+
+# 模型和配額配置
+EMBEDDING_CONFIG = {
+    "default_model": "gemini-embedding-exp",  # 默認模型
+    "fallback_model": "all-MiniLM-L6-v2",     # 本地備用模型
+    "batch_size": 8,                          # 批量大小
+    "embedding_dimension": 768                # 嵌入維度
+}
+
+# 自定義Gemini嵌入函數類
+class GeminiEmbeddingFunction:
+    def __init__(self, model_name="gemini-embedding-exp", batch_size=8):
+        """
+        初始化Gemini嵌入函數，支持配置和自動降級
+        
+        Args:
+            model_name: Gemini嵌入模型名稱
+            batch_size: 批處理大小，每批處理的文本數量
+        """
+        self.model_name = model_name
+        self.batch_size = batch_size
+        
+        # 獲取API密鑰
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("請在 .env 檔案中設定 GEMINI_API_KEY 或 GOOGLE_API_KEY")
+        
+        genai.configure(api_key=api_key)
+        
+        # 退避策略配置
+        self.backoff_config = {
+            "initial_wait": 1.0,   # 初始等待時間(秒)
+            "max_retries": 3,      # 最大重試次數
+            "backoff_factor": 2.0  # 退避倍數
+        }
+        
+        # 初始化本地模型作為備用
+        self.local_model = None
+        try:
+            from sentence_transformers import SentenceTransformer
+            import torch
+            
+            # 檢查CUDA可用性
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.local_model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+            print(f"已加載本地嵌入模型 all-MiniLM-L6-v2 (作為備用) 在 {device} 設備上")
+        except Exception as e:
+            print(f"無法加載本地嵌入模型: {str(e)}")
+        
+        # 初始化計數器
+        self.api_success = 0
+        self.api_failure = 0
+        
+        print(f"Gemini嵌入模型 '{model_name}' 初始化成功，批次大小：{batch_size}")
+    
+    def __call__(self, input):
+        """
+        將文本轉換為嵌入向量
+        
+        Args:
+            input: 要嵌入的文本或文本列表
+        
+        Returns:
+            嵌入向量列表
+        """
+        if not input:
+            return []
+        
+        # 確保文本是有效的字符串列表
+        texts = input if isinstance(input, list) else [input]
+        texts = [t for t in texts if isinstance(t, str) and t.strip()]
+        if not texts:
+            return []
+        
+        # 使用批處理來獲取嵌入
+        return self._process_in_batches(texts)
+    
+    def _process_in_batches(self, texts):
+        """
+        批次處理文本嵌入，支持自動重試和降級
+        """
+        import time
+        import numpy as np
+        
+        # 分批處理
+        batches = [texts[i:i+self.batch_size] for i in range(0, len(texts), self.batch_size)]
+        all_embeddings = []
+        
+        for i, batch in enumerate(batches):
+            print(f"嵌入處理：第 {i+1}/{len(batches)} 批 ({len(batch)} 條文本)")
+            
+            # 嘗試使用Gemini API
+            batch_embeddings = None
+            retry_count = 0
+            last_error = None
+            
+            # 重試邏輯
+            while retry_count <= self.backoff_config["max_retries"]:
+                try:
+                    # 嘗試使用Gemini API獲取嵌入
+                    batch_embeddings = []
+                    for text in batch:
+                        # 文本預處理：裁剪長文本
+                        if len(text) > 8192:
+                            text = text[:8192]
+                            
+                        # 獲取嵌入
+                        result = genai.embed_content(
+                            model=self.model_name,
+                            content=text,
+                            task_type="retrieval_document"  # 使用retrieval_document而非semantic_similarity
+                        )
+                        
+                        # 提取嵌入向量
+                        embedding = np.array(result["embedding"])
+                        batch_embeddings.append(embedding)
+                    
+                    # 如果成功，跳出重試循環
+                    self.api_success += 1
+                    break
+                
+                except Exception as e:
+                    last_error = e
+                    retry_count += 1
+                    
+                    # 檢查是否應該重試
+                    if retry_count <= self.backoff_config["max_retries"]:
+                        wait_time = self.backoff_config["initial_wait"] * (
+                            self.backoff_config["backoff_factor"] ** (retry_count - 1)
+                        )
+                        print(f"嵌入API錯誤: {str(e)}，等待 {wait_time:.1f} 秒後重試 ({retry_count}/{self.backoff_config['max_retries']})")
+                        time.sleep(wait_time)
+                    else:
+                        print(f"達到最大重試次數，嵌入API錯誤: {str(e)}")
+                        self.api_failure += 1
+            
+            # 如果API調用失敗，使用本地模型
+            if batch_embeddings is None:
+                print("API調用失敗，使用本地嵌入模型作為備用")
+                if self.local_model:
+                    try:
+                        batch_embeddings = self.local_model.encode(batch)
+                    except Exception as local_error:
+                        print(f"本地模型嵌入失敗: {str(local_error)}")
+                        # 使用零向量作為最後的備用選項
+                        batch_embeddings = [np.zeros(768) for _ in batch]
+                else:
+                    print("無本地模型可用，使用零向量")
+                    # 無本地模型時，使用零向量
+                    batch_embeddings = [np.zeros(768) for _ in batch]
+            
+            # 添加批次結果到總結果
+            all_embeddings.extend(batch_embeddings)
+            
+            # 批次間添加短暫延遲，避免超過API速率限制
+            if i < len(batches) - 1:
+                time.sleep(1.5)
+        
+        return all_embeddings
 
 class VectorStore:
     def __init__(self, force_reset=False):
@@ -43,76 +208,214 @@ class VectorStore:
         else:
             print(f"使用現有的持久化目錄：{self.persist_path}")
 
-        # 嘗試多種初始化策略
+        # 初始化策略
+        self._initialize_vector_store()
+    
+    def _initialize_vector_store(self):
+        """優化的向量存儲初始化方法，支持多種初始化策略和降級方案"""
         success = False
         error_messages = []
         
-        # 嘗試使用常規方式初始化
+        # 檢查資料庫文件是否存在，如果存在且為空目錄但初始化失敗，可能是結構問題
+        db_file = os.path.join(self.persist_path, "chroma.sqlite3")
+        if not os.path.exists(db_file) and os.path.exists(self.persist_path) and len(os.listdir(self.persist_path)) == 0:
+            print(f"檢測到向量庫目錄存在但無數據庫文件，嘗試強制重置...")
+            try:
+                shutil.rmtree(self.persist_path)
+                os.makedirs(self.persist_path, exist_ok=True, mode=0o777)
+                print(f"已強制重置向量庫目錄: {self.persist_path}")
+            except Exception as e:
+                print(f"強制重置向量庫時出錯: {str(e)}")
+        
+        # 第一階段：嘗試使用Gemini嵌入模型初始化
         try:
+            print("嘗試使用Gemini嵌入模型初始化向量庫...")
             self.client = chromadb.PersistentClient(path=self.persist_path)
-            self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name="all-MiniLM-L6-v2"
+            
+            # 使用優化過的Gemini嵌入函數
+            self.embedding_function = GeminiEmbeddingFunction(
+                model_name=EMBEDDING_CONFIG["default_model"],
+                batch_size=EMBEDDING_CONFIG["batch_size"]
             )
+            
+            # 創建或獲取集合，使用改進的索引設置
             self.collection = self.client.get_or_create_collection(
                 name="exam_questions",
                 embedding_function=self.embedding_function,
-                metadata={"hnsw:space": "cosine", "hnsw:construction_ef": 100, "hnsw:M": 16}
+                metadata={
+                    "hnsw:space": "cosine",          # 使用余弦相似度
+                    "hnsw:construction_ef": 100,     # 建立索引時的擴展因子
+                    "hnsw:search_ef": 100,           # 搜索時的擴展因子
+                    "hnsw:M": 16,                    # 每個節點的最大連接數
+                    "hnsw:num_threads": 4            # 使用多線程構建索引
+                }
             )
             success = True
-            print("向量庫初始化成功")
+            print("使用Gemini嵌入模型成功初始化向量庫")
         except Exception as e:
-            error_message = f"標準初始化失敗: {str(e)}"
+            error_message = f"使用Gemini嵌入模型初始化失敗: {str(e)}"
             print(error_message)
             error_messages.append(error_message)
             
-            # 如果是數據庫結構問題，嘗試完全重置
-            if "no such column" in str(e) and os.path.exists(self.persist_path):
+            # 如果發現是數據庫結構錯誤，立即嘗試重置
+            if "no such column" in str(e) or "readonly database" in str(e):
+                print("檢測到數據庫結構錯誤，嘗試強制刪除並重建...")
                 try:
-                    print("檢測到數據庫結構變更，嘗試完全重置...")
-                    shutil.rmtree(self.persist_path)
-                    os.makedirs(self.persist_path, exist_ok=True, mode=0o755)
-                    print(f"已重新創建向量庫目錄：{self.persist_path}")
+                    # 徹底刪除目錄
+                    if os.path.exists(self.persist_path):
+                        shutil.rmtree(self.persist_path)
+                    # 使用系統命令確保完全刪除    
+                    os.system(f"rm -rf {self.persist_path}")
+                    # 重新創建目錄
+                    os.makedirs(self.persist_path, exist_ok=True, mode=0o777)
+                    # 設置寬鬆權限確保可寫
+                    os.system(f"chmod -R 777 {self.persist_path}")
+                    print(f"已強制刪除並重建向量庫目錄: {self.persist_path}")
                     
                     # 重新嘗試初始化
-                    self.client = chromadb.PersistentClient(path=self.persist_path)
-                    self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                        model_name="all-MiniLM-L6-v2"
-                    )
-                    self.collection = self.client.get_or_create_collection(
-                        name="exam_questions",
-                        embedding_function=self.embedding_function,
-                        metadata={"hnsw:space": "cosine"}  # 使用簡化的元數據
-                    )
-                    success = True
-                    print("向量庫重置後成功初始化")
-                except Exception as reset_error:
-                    error_message = f"重置後初始化失敗: {str(reset_error)}"
-                    print(error_message)
-                    error_messages.append(error_message)
-
-        # 如果前面的方法都失敗，嘗試使用內存模式
+                    try:
+                        self.client = chromadb.PersistentClient(path=self.persist_path)
+                        self.embedding_function = GeminiEmbeddingFunction(
+                            model_name=EMBEDDING_CONFIG["default_model"],
+                            batch_size=EMBEDDING_CONFIG["batch_size"]
+                        )
+                        self.collection = self.client.get_or_create_collection(
+                            name="exam_questions",
+                            embedding_function=self.embedding_function,
+                            metadata={"hnsw:space": "cosine"}
+                        )
+                        success = True
+                        print("強制重置後成功初始化向量庫")
+                        return  # 成功初始化後直接返回
+                    except Exception as reset_e:
+                        print(f"重置後仍無法初始化: {str(reset_e)}")
+                except Exception as del_e:
+                    print(f"刪除向量庫目錄時出錯: {str(del_e)}")
+        
+        # 第二階段：如果使用Gemini失敗，嘗試使用SentenceTransformer
         if not success:
             try:
-                print("嘗試使用內存模式作為備用選項...")
-                self.client = chromadb.Client()  # 內存模式
-                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                    model_name="all-MiniLM-L6-v2"
+                print("嘗試使用SentenceTransformer嵌入模型初始化向量庫...")
+                self.client = chromadb.PersistentClient(path=self.persist_path)
+                
+                # 使用SentenceTransformer嵌入函數，添加相容層以適應新接口
+                from sentence_transformers import SentenceTransformer
+                model = SentenceTransformer(EMBEDDING_CONFIG["fallback_model"])
+                
+                # 創建一個包裝器，確保接口一致性
+                class STWrapper:
+                    def __init__(self, model):
+                        self.model = model
+                    
+                    def __call__(self, input):
+                        # 保持與新的ChromaDB接口兼容
+                        texts = input if isinstance(input, list) else [input]
+                        return self.model.encode(texts)
+                
+                self.embedding_function = STWrapper(model)
+                
+                # 創建或獲取集合，使用基本設置
+                self.collection = self.client.get_or_create_collection(
+                    name="exam_questions",
+                    embedding_function=self.embedding_function,
+                    metadata={"hnsw:space": "cosine"}  # 使用簡化設置
                 )
+                success = True
+                print("使用SentenceTransformer嵌入模型成功初始化向量庫")
+            except Exception as e:
+                error_message = f"使用SentenceTransformer初始化失敗: {str(e)}"
+                print(error_message)
+                error_messages.append(error_message)
+        
+        # 第三階段：如果持久化存儲有問題，嘗試重置數據庫
+        if not success and any(x in str(error_messages) for x in ["no such column", "readonly database", "permission denied"]):
+            try:
+                print("檢測到數據庫結構變更或權限問題，嘗試完全重置...")
+                # 強制刪除並重新創建目錄
+                if os.path.exists(self.persist_path):
+                    shutil.rmtree(self.persist_path)
+                # 使用系統命令確保完全刪除    
+                os.system(f"rm -rf {self.persist_path}")
+                # 重新創建目錄
+                os.makedirs(self.persist_path, exist_ok=True, mode=0o777)
+                # 設置寬鬆權限確保可寫
+                os.system(f"chmod -R 777 {self.persist_path}")
+                
+                # 重新嘗試初始化
+                self.client = chromadb.PersistentClient(path=self.persist_path)
+                
+                # 優先使用SentenceTransformer作為重置後的模型（更穩定）
+                from sentence_transformers import SentenceTransformer
+                model = SentenceTransformer(EMBEDDING_CONFIG["fallback_model"])
+                
+                # 創建相同的包裝器
+                class STWrapper:
+                    def __init__(self, model):
+                        self.model = model
+                    
+                    def __call__(self, input):
+                        texts = input if isinstance(input, list) else [input]
+                        return self.model.encode(texts)
+                
+                self.embedding_function = STWrapper(model)
+                
+                # 簡化設置
+                self.collection = self.client.get_or_create_collection(
+                    name="exam_questions",
+                    embedding_function=self.embedding_function,
+                    metadata={"hnsw:space": "cosine"}
+                )
+                success = True
+                print("向量庫重置後成功初始化")
+            except Exception as reset_error:
+                error_message = f"重置後初始化失敗: {str(reset_error)}"
+                print(error_message)
+                error_messages.append(error_message)
+        
+        # 第四階段：最終備用選項 - 使用內存模式
+        if not success:
+            try:
+                print("嘗試使用內存模式作為最終備用選項...")
+                self.client = chromadb.Client()  # 內存模式
+                
+                # 使用SentenceTransformer（最穩定的選項）
+                from sentence_transformers import SentenceTransformer
+                model = SentenceTransformer(EMBEDDING_CONFIG["fallback_model"])
+                
+                # 使用相同的包裝器
+                class STWrapper:
+                    def __init__(self, model):
+                        self.model = model
+                    
+                    def __call__(self, input):
+                        texts = input if isinstance(input, list) else [input]
+                        return self.model.encode(texts)
+                
+                self.embedding_function = STWrapper(model)
+                
+                # 使用基本配置
                 self.collection = self.client.get_or_create_collection(
                     name="exam_questions",
                     embedding_function=self.embedding_function
                 )
-                print("成功使用內存模式初始化向量庫（注意：數據不會持久化）")
                 success = True
+                print("⚠️ 成功使用內存模式初始化向量庫（注意：數據不會持久化）")
             except Exception as mem_error:
                 error_message = f"內存模式初始化失敗: {str(mem_error)}"
                 print(error_message)
                 error_messages.append(error_message)
         
-        # 如果所有嘗試都失敗，則拋出異常
+        # 如果所有嘗試都失敗，拋出異常
         if not success:
             error_details = "\n".join(error_messages)
-            raise RuntimeError(f"無法初始化向量庫，嘗試了多種方法但都失敗:\n{error_details}")
+            raise RuntimeError(f"無法初始化向量庫，所有嘗試均失敗：\n{error_details}")
+        
+        # 輸出集合大小
+        try:
+            count = self.collection.count()
+            print(f"向量庫初始化完成，當前共有 {count} 個文檔")
+        except:
+            print("向量庫初始化完成，但無法獲取文檔數量")
 
     def add_questions(self, questions: List[Dict], exam_name: str):
         documents = []
@@ -193,9 +496,58 @@ class VectorStore:
         return exam_questions
 
     def delete_exam_questions(self, exam_name: str):
-        results = self.collection.get(where={"exam_name": exam_name})
-        if results and results.get("ids"):
-            self.collection.delete(ids=results["ids"])
+        """刪除特定考試名稱的所有題目
+        
+        支持新版和舊版ChromaDB的API結構，
+        並增加錯誤處理以提高穩定性
+        
+        Args:
+            exam_name: 要刪除的考試名稱
+        """
+        try:
+            # 方法1: 使用where參數查詢（新版本ChromaDB方式）
+            try:
+                results = self.collection.get(where={"exam_name": exam_name})
+                if results and results.get("ids") and len(results["ids"]) > 0:
+                    print(f"找到 {len(results['ids'])} 個題目將被刪除")
+                    self.collection.delete(ids=results["ids"])
+                    print(f"已成功刪除考試 '{exam_name}' 的所有題目")
+                    return
+            except Exception as e:
+                if "no such column: collections.topic" in str(e):
+                    print(f"使用新版API刪除失敗，嘗試使用替代方法: {str(e)}")
+                else:
+                    raise
+            
+            # 方法2: 獲取所有題目並篩選（舊版本兼容方式）
+            try:
+                all_results = self.collection.get()
+                if not all_results or not all_results.get("ids"):
+                    print("向量庫為空或無法獲取內容")
+                    return
+                    
+                # 找出要刪除的ID
+                ids_to_delete = []
+                for i, metadata in enumerate(all_results["metadatas"]):
+                    if metadata.get("exam_name") == exam_name:
+                        ids_to_delete.append(all_results["ids"][i])
+                
+                if ids_to_delete:
+                    print(f"找到 {len(ids_to_delete)} 個題目將被刪除 (替代方法)")
+                    self.collection.delete(ids=ids_to_delete)
+                    print(f"已成功刪除考試 '{exam_name}' 的所有題目")
+                else:
+                    print(f"未找到考試 '{exam_name}' 的題目")
+            except Exception as e:
+                print(f"替代刪除方法也失敗: {str(e)}")
+                raise
+            
+        except Exception as e:
+            print(f"刪除題目時發生錯誤: {str(e)}")
+            # 如果是ChromaDB結構錯誤，提供更明確的錯誤信息
+            if "no such column: collections.topic" in str(e):
+                print("檢測到ChromaDB結構變更，建議重置向量庫: python reset_vector_db.py")
+            raise
 
     # 增強：根據關鍵字搜索題目
     def search_by_keyword(self, keyword: str, n_results: int = 10) -> List[Dict]:
@@ -415,83 +767,37 @@ class VectorStore:
 
     # 新增功能：根據題目類型搜索
     def search_by_question_type(self, question_type: str, n_results: int = 10) -> List[Dict]:
-        """
-        根據題目類型搜索題目
-        
-        參數:
-            question_type: 要搜索的題目類型（如「單選題」、「多選題」等）
-            n_results: 返回結果數量
-            
-        返回值:
-            符合條件的題目列表
-        """
-        # 標準化題目類型，避免因為小寫大寫或空格造成匹配問題
-        normalized_type = question_type.strip().lower()
-        
-        # 嘗試按類型進行精確匹配
+        """根據題目類型搜索（完全匹配）"""
         try:
-            results = self.collection.get(
-                where={"type": {"$eq": question_type}},
-                limit=n_results
+            # 使用元數據過濾搜索
+            results = self.collection.query(
+                query_texts=[""],  # 空查詢文本
+                where={"type": question_type},
+                n_results=n_results
             )
+            
+            return self._format_search_results(results)
         except Exception as e:
-            print(f"按題型精確匹配搜索失敗: {str(e)}，嘗試獲取全部題目後過濾")
-            results = {"ids": [], "documents": [], "metadatas": []}
-        
-        # 如果沒有找到結果或發生錯誤，獲取所有題目後手動過濾
-        if not results["ids"]:
-            all_questions = self.collection.get()
-            if not all_questions or "metadatas" not in all_questions:
-                return []
-                
-            matching_questions = []
-            
-            for i, metadata in enumerate(all_questions["metadatas"]):
-                q_type = metadata.get("type", "")
-                if q_type:  # 确保q_type不是None，避免空值异常
-                    q_type = q_type.strip().lower()
-                else:
-                    q_type = ""
-                
-                # 精確匹配
-                if q_type == normalized_type:
-                    matching_questions.append({
-                        "content": all_questions["documents"][i],
-                        "metadata": metadata,
-                        "distance": 0  # 完全匹配，距離為0
-                    })
-                # 包含匹配（如搜尋"選題"可匹配"單選題"和"多選題"）
-                elif normalized_type in q_type or q_type in normalized_type:
-                    matching_questions.append({
-                        "content": all_questions["documents"][i],
-                        "metadata": metadata,
-                        "distance": 0.3  # 部分匹配，距離較小
-                    })
-            
-            # 根據匹配度排序
-            sorted_questions = sorted(matching_questions, key=lambda q: q["distance"])
-            
-            # 返回前N個結果
-            return sorted_questions[:n_results]
-        else:
-            # 轉換原始結果為標準格式
-            matching_questions = []
-            for i in range(len(results["ids"])):
-                matching_questions.append({
-                    "content": results["documents"][i],
-                    "metadata": results["metadatas"][i],
-                    "distance": 0  # 直接查詢的結果，距離為0
-                })
-            return matching_questions
+            print(f"根據題目類型搜索失敗: {str(e)}")
+            return []
 
-    # 獲取所有可用的題目類型
+    def search_by_exam_name(self, exam_name: str, n_results: int = 100) -> List[Dict]:
+        """根據考試名稱搜索題目"""
+        try:
+            # 使用元數據過濾搜索
+            results = self.collection.query(
+                query_texts=[""],  # 空查詢文本
+                where={"exam_name": exam_name},
+                n_results=n_results
+            )
+            
+            return self._format_search_results(results)
+        except Exception as e:
+            print(f"根據考試名稱搜索失敗: {str(e)}")
+            return []
+
     def get_all_question_types(self) -> List[str]:
-        """
-        獲取向量庫中所有可用的題目類型
-        
-        返回值:
-            排序後的題目類型列表
-        """
+        """獲取所有可用的題目類型"""
         try:
             all_questions = self.collection.get()
             if not all_questions or "metadatas" not in all_questions:
@@ -616,6 +922,55 @@ class VectorStore:
             if "no such column" in str(e):
                 print("檢測到數據庫結構不兼容，無法獲取法條列表")
             return []
+
+    def reset_database(self):
+        """
+        重置向量數據庫 - 完全刪除並重建集合
+        警告：此操作將刪除所有向量數據
+        """
+        try:
+            print("開始重置向量數據庫...")
+            # 嘗試刪除舊集合
+            try:
+                self.client.delete_collection("exam_questions")
+                print("已刪除現有集合")
+            except Exception as e:
+                print(f"無法刪除集合(可能不存在): {str(e)}")
+            
+            # 建立新集合
+            self.collection = self.client.create_collection(
+                name="exam_questions",
+                embedding_function=self.embedding_function,
+                metadata={"hnsw:space": "cosine"}
+            )
+            
+            # 嘗試清理持久化目錄中的數據文件
+            if os.path.exists(self.persist_path):
+                try:
+                    chroma_db_path = os.path.join(self.persist_path, "chroma.sqlite3")
+                    if os.path.exists(chroma_db_path):
+                        os.remove(chroma_db_path)
+                        print(f"已刪除數據庫文件: {chroma_db_path}")
+                except Exception as e:
+                    print(f"清理數據庫文件失敗: {str(e)}")
+            
+            print("向量數據庫重置完成")
+            return True
+        except Exception as e:
+            print(f"重置向量數據庫失敗: {str(e)}")
+            return False
+
+    def _format_search_results(self, results):
+        if not results["documents"]:
+            return []
+        formatted_results = []
+        for i in range(len(results["documents"][0])):
+            formatted_results.append({
+                "content": results["documents"][0][i],
+                "metadata": results["metadatas"][0][i],
+                "distance": results["distances"][0][i] if "distances" in results else None
+            })
+        return formatted_results
 
 # 嘗試初始化向量庫，如果失敗則嘗試重置後重新初始化
 try:

@@ -1,0 +1,170 @@
+.metadata-statistics {
+  margin: 20px 0;
+}
+
+.statistics-card {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.statistics-description {
+  color: #666;
+  margin-bottom: 16px;
+}
+
+.statistics-summary {
+  margin: 16px 0;
+  padding: 8px 12px;
+  background-color: #f6f8fa;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background-color: #f9f9f9;
+  border-radius: 4px;
+  align-items: center;
+}
+
+.filter-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.no-data {
+  text-align: center;
+  padding: 40px 0;
+  color: #999;
+  font-size: 16px;
+}
+
+@media (max-width: 768px) {
+  .filters {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .filter-item {
+    width: 100%;
+  }
+}
+
+/* MetadataStatisticsSidebar.css */
+.metadata-sidebar {
+  position: fixed;
+  right: 0;
+  top: 0;
+  height: 100vh;
+  width: 380px;
+  background-color: #fff;
+  box-shadow: -2px 0 8px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  transition: transform 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  overflow: hidden;
+}
+
+.sidebar-visible {
+  transform: translateX(0);
+}
+
+.sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  background-color: #1890ff;
+  color: white;
+}
+
+.sidebar-header h3 {
+  margin: 0;
+  color: white;
+}
+
+.sidebar-filters {
+  padding: 12px 16px;
+  background-color: #f9f9f9;
+  border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 12px;
+}
+
+.statistics-table-container {
+  flex: 1;
+  overflow: auto;
+  padding: 0 16px;
+}
+
+.statistics-info {
+  padding: 8px 16px;
+  background-color: #f6ffed;
+  border-bottom: 1px solid #b7eb8f;
+  font-size: 12px;
+  color: #52c41a;
+}
+
+.sidebar-footer {
+  padding: 8px 16px;
+  border-top: 1px solid #f0f0f0;
+  text-align: right;
+  background-color: #fafafa;
+}
+
+.no-data {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 200px;
+  color: #999;
+}
+
+/* 側邊欄切換按鈕 */
+.sidebar-toggle-container {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 999;
+}
+
+.toggle-sidebar-button {
+  height: 48px;
+  width: 48px;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: -2px 0 8px rgba(0, 0, 0, 0.15);
+}
+
+/* 響應式設計 */
+@media (max-width: 768px) {
+  .metadata-sidebar {
+    width: 300px;
+  }
+}
+
+@media (max-width: 480px) {
+  .metadata-sidebar {
+    width: 100%;
+  }
+}

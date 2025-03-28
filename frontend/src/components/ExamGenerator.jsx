@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from "react";
 import { submitAnswers } from "../services/api";
 import { message, Button, Input, Form, Tabs, Modal, Spin, Tag } from "antd";
+import MetadataStatistics from "./MetadataStatistics";
 import "./ExamGenerator.css";
+import { BarChartOutlined } from "@ant-design/icons";
 
-const { TabPane } = Tabs;
+
 
 const ExamGenerator = () => {
   const [examName, setExamName] = useState("");
@@ -17,6 +19,7 @@ const ExamGenerator = () => {
   const [modalVisible, setModalVisible] = useState(false);
   const [modalContent, setModalContent] = useState({ type: "", data: [] });
   const [metadataLoading, setMetadataLoading] = useState(false);
+  const [sidebarVisible, setSidebarVisible] = useState(false);
 
   const handleGenerateExam = async () => {
     if (!examName.trim()) {
@@ -125,76 +128,94 @@ const ExamGenerator = () => {
     }
   };
 
+  const toggleSidebar = (visible) => {
+    setSidebarVisible(visible);
+  };
+
   return (
-    <div className="exam-generator-container">
+    <div
+      className={`exam-generator-container ${
+        sidebarVisible ? "with-sidebar" : ""
+      }`}
+    >
       <h2>模擬考題生成測試</h2>
-      <Tabs activeKey={activeTab} onChange={(key) => setActiveTab(key)}>
-        <TabPane tab="預設生成" key="default">
-          <Form layout="vertical">
-            <Form.Item label="考試名稱">
-              <Input
-                value={examName}
-                onChange={(e) => setExamName(e.target.value)}
-                placeholder="例如：111年司法官考試"
-              />
-            </Form.Item>
-            <Form.Item label="題目數量">
-              <Input
-                type="number"
-                value={numQuestions}
-                onChange={(e) =>
-                  setNumQuestions(parseInt(e.target.value) || 10)
-                }
-              />
-            </Form.Item>
-            <Form.Item>
-              <Button
-                type="primary"
-                onClick={handleGenerateExam}
-                loading={loading}
-              >
-                {loading ? "生成中..." : "生成模擬考題"}
-              </Button>
-            </Form.Item>
-          </Form>
-        </TabPane>
-        <TabPane tab="關鍵字檢索" key="keyword">
-          <Form layout="vertical">
-            <Form.Item label="考試名稱">
-              <Input
-                value={examName}
-                onChange={(e) => setExamName(e.target.value)}
-                placeholder="例如：111年司法官考試"
-              />
-            </Form.Item>
-            <Form.Item label="關鍵字 (RAG 檢索)">
-              <Input
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-                placeholder="輸入關鍵字，例如：刑法"
-              />
-            </Form.Item>
-            <Form.Item label="題目數量">
-              <Input
-                type="number"
-                value={numQuestions}
-                onChange={(e) =>
-                  setNumQuestions(parseInt(e.target.value) || 10)
-                }
-              />
-            </Form.Item>
-            <Form.Item>
-              <Button
-                type="primary"
-                onClick={handleGenerateExam}
-                loading={loading}
-              >
-                {loading ? "生成中..." : "生成模擬考題"}
-              </Button>
-            </Form.Item>
-          </Form>
-        </TabPane>
-      </Tabs>
+      <Tabs
+        items={[
+          {
+            key: "1",
+            label: "預設生成",
+            children: (
+              <Form layout="vertical">
+                <Form.Item label="考試名稱">
+                  <Input
+                    value={examName}
+                    onChange={(e) => setExamName(e.target.value)}
+                    placeholder="例如：111年司法官考試"
+                  />
+                </Form.Item>
+                <Form.Item label="題目數量">
+                  <Input
+                    type="number"
+                    value={numQuestions}
+                    onChange={(e) =>
+                      setNumQuestions(parseInt(e.target.value) || 10)
+                    }
+                  />
+                </Form.Item>
+                <Form.Item>
+                  <Button
+                    type="primary"
+                    onClick={handleGenerateExam}
+                    loading={loading}
+                  >
+                    {loading ? "生成中..." : "生成模擬考題"}
+                  </Button>
+                </Form.Item>
+              </Form>
+            ),
+          },
+          {
+            key: "2",
+            label: "關鍵字檢索",
+            children: (
+              <Form layout="vertical">
+                <Form.Item label="考試名稱">
+                  <Input
+                    value={examName}
+                    onChange={(e) => setExamName(e.target.value)}
+                    placeholder="例如：111年司法官考試"
+                  />
+                </Form.Item>
+                <Form.Item label="關鍵字 (RAG 檢索)">
+                  <Input
+                    value={keyword}
+                    onChange={(e) => setKeyword(e.target.value)}
+                    placeholder="輸入關鍵字，例如：刑法"
+                  />
+                </Form.Item>
+                <Form.Item label="題目數量">
+                  <Input
+                    type="number"
+                    value={numQuestions}
+                    onChange={(e) =>
+                      setNumQuestions(parseInt(e.target.value) || 10)
+                    }
+                  />
+                </Form.Item>
+                <Form.Item>
+                  <Button
+                    type="primary"
+                    onClick={handleGenerateExam}
+                    loading={loading}
+                  >
+                    {loading ? "生成中..." : "生成模擬考題"}
+                  </Button>
+                </Form.Item>
+              </Form>
+            ),
+          },
+        ]}
+      />
 
       {generatedExam.length > 0 && (
         <div>
@@ -304,7 +325,7 @@ const ExamGenerator = () => {
 
       <Modal
         title={modalContent.type}
-        visible={modalVisible}
+        open={modalVisible}
         onCancel={() => setModalVisible(false)}
         footer={null}
         width={800}
@@ -329,6 +350,18 @@ const ExamGenerator = () => {
           </div>
         </Spin>
       </Modal>
+
+      <div className="action-buttons">
+        <Button
+          type="default"
+          icon={<BarChartOutlined />}
+          onClick={() => toggleSidebar(true)}
+        >
+          查看統計
+        </Button>
+      </div>
+
+      <MetadataStatistics visible={sidebarVisible} onClose={toggleSidebar} />
     </div>
   );
 };

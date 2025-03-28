@@ -86,17 +86,6 @@ def parse_questions(text: str, exam_name: str) -> List[Dict[str, Any]]:
     
     return parsed_questions
 
-class CustomJSONEncoder(json.JSONEncoder):
-    """自定義JSON編碼器，處理None值"""
-    def default(self, obj):
-        if obj is None:
-            return ""  # 將None轉換為空字符串
-        # 處理其他不可序列化的類型
-        try:
-            return super().default(obj)
-        except TypeError:
-            return str(obj)  # 將其他不可序列化的對象轉換為字符串
-
 def save_to_json(questions: List[Dict[str, Any]], exam_name: str, output_dir: str = "downloads") -> str:
     """將解析後的問題保存為 JSON 檔案"""
     # 確保輸出目錄存在
@@ -105,6 +94,69 @@ def save_to_json(questions: List[Dict[str, Any]], exam_name: str, output_dir: st
     # 預處理問題，確保所有值都是可序列化的，並檢查ID唯一性
     processed_questions = []
     seen_ids = set()
+    
+    try:
+        # 嘗試導入增強的JSON處理模塊
+        from process_json import EnhancedJSONEncoder, clean_for_json
+        use_enhanced_encoder = True
+        print("使用增強的JSON處理模塊")
+    except ImportError:
+        # 如果模塊不可用，使用本地定義的編碼器
+        use_enhanced_encoder = False
+        print("使用本地JSON編碼器")
+        
+        # 自定義JSON編碼器，處理NumPy數組和其他特殊類型
+        class CustomJSONEncoder(json.JSONEncoder):
+            def default(self, obj):
+                import numpy as np
+                import sys
+                
+                # 處理None值
+                if obj is None:
+                    return ""
+                    
+                # 處理NumPy數組
+                if 'numpy' in sys.modules:
+                    if isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                        
+                    # 處理NumPy標量
+                    if isinstance(obj, (np.integer, np.floating, np.bool_)):
+                        return obj.item()
+                        
+                    # 處理可能導致"The truth value of an array"錯誤的對象
+                    if hasattr(obj, 'any') and hasattr(obj, 'all') and hasattr(obj, 'shape'):
+                        # 是類數組對象，轉換為列表
+                        try:
+                            return np.asarray(obj).tolist()
+                        except:
+                            pass
+                
+                # 處理集合類型
+                if isinstance(obj, set):
+                    return list(obj)
+                    
+                # 處理元組
+                if isinstance(obj, tuple):
+                    return list(obj)
+                    
+                # 處理日期和時間
+                if hasattr(obj, 'isoformat'):
+                    return obj.isoformat()
+                    
+                # 處理可轉換的對象
+                if hasattr(obj, 'to_dict'):
+                    return obj.to_dict()
+                    
+                if hasattr(obj, '__dict__'):
+                    return obj.__dict__
+                    
+                # 處理其他不可序列化的類型
+                try:
+                    return super().default(obj)
+                except TypeError:
+                    # 如果無法序列化，轉換為字符串
+                    return str(obj)
     
     for index, question in enumerate(questions):
         # 檢查是否有重複ID
@@ -139,9 +191,45 @@ def save_to_json(questions: List[Dict[str, Any]], exam_name: str, output_dir: st
     filename = f"questions_{timestamp}.json"
     filepath = os.path.join(output_dir, filename)
     
-    # 寫入 JSON 檔案
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
+    # 寫入 JSON 檔案，使用自定義編碼器
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            if use_enhanced_encoder:
+                # 如果可用，使用增強的JSON處理
+                # 先清理數據以確保可序列化
+                output_data = clean_for_json(output_data)
+                json.dump(output_data, f, ensure_ascii=False, indent=2, cls=EnhancedJSONEncoder)
+            else:
+                # 否則使用本地編碼器
+                json.dump(output_data, f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
+        print(f"成功保存JSON文件: {filename}")
+    except Exception as e:
+        print(f"JSON序列化錯誤: {str(e)}")
+        
+        # 嘗試使用更安全的序列化方法
+        try:
+            if use_enhanced_encoder:
+                from process_json import safe_json_dumps
+                # 使用safe_json_dumps來序列化
+                json_str = safe_json_dumps(output_data, ensure_ascii=False, indent=2)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(json_str)
+                print(f"使用安全序列化方法保存: {filename}")
+                return filename
+        except Exception:
+            pass
+            
+        # 如果上述方法都失敗，使用最保守的方法
+        safe_output = {
+            "exam": exam_name,
+            "questions": [],
+            "error": f"原始序列化失敗: {str(e)}"
+        }
+        
+        # 安全的保存方式
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(safe_output, f, ensure_ascii=False, indent=2)
+        print(f"使用最保守方法保存: {filename}")
     
     return filename
 
