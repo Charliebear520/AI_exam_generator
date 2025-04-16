@@ -10,21 +10,25 @@ import uuid
 import google.generativeai as genai
 from dotenv import load_dotenv
 import numpy as np
+import logging
+
+# 配置日誌
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # 載入環境變數
 load_dotenv()
 
 # 模型和配額配置
 EMBEDDING_CONFIG = {
-    "default_model": "gemini-embedding-exp",  # 默認模型
-    "fallback_model": "all-MiniLM-L6-v2",     # 本地備用模型
-    "batch_size": 8,                          # 批量大小
-    "embedding_dimension": 768                # 嵌入維度
+    "default_model": "gemini-2.0-flash",  # 默認模型
+    "fallback_model": "text-embedding-3-large",  # OpenAI 備用模型
+    "batch_size": 8,  # 批量大小
+    "embedding_dimension": 768  # 嵌入維度
 }
 
-# 自定義Gemini嵌入函數類
 class GeminiEmbeddingFunction:
-    def __init__(self, model_name="gemini-embedding-exp", batch_size=8):
+    def __init__(self, model_name="gemini-2.0-flash", batch_size=8):
         """
         初始化Gemini嵌入函數，支持配置和自動降級
         
@@ -36,11 +40,14 @@ class GeminiEmbeddingFunction:
         self.batch_size = batch_size
         
         # 獲取API密鑰
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("請在 .env 檔案中設定 GEMINI_API_KEY 或 GOOGLE_API_KEY")
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
         
-        genai.configure(api_key=api_key)
+        if not self.gemini_api_key and not self.openai_api_key:
+            raise ValueError("請在 .env 檔案中設定 GEMINI_API_KEY 或 OPENAI_API_KEY")
+        
+        if self.gemini_api_key:
+            genai.configure(api_key=self.gemini_api_key)
         
         # 退避策略配置
         self.backoff_config = {
@@ -49,34 +56,11 @@ class GeminiEmbeddingFunction:
             "backoff_factor": 2.0  # 退避倍數
         }
         
-        # 初始化本地模型作為備用
-        self.local_model = None
-        try:
-            from sentence_transformers import SentenceTransformer
-            import torch
-            
-            # 檢查CUDA可用性
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            self.local_model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
-            print(f"已加載本地嵌入模型 all-MiniLM-L6-v2 (作為備用) 在 {device} 設備上")
-        except Exception as e:
-            print(f"無法加載本地嵌入模型: {str(e)}")
-        
-        # 初始化計數器
-        self.api_success = 0
-        self.api_failure = 0
-        
-        print(f"Gemini嵌入模型 '{model_name}' 初始化成功，批次大小：{batch_size}")
+        logger.info(f"嵌入模型 '{model_name}' 初始化成功，批次大小：{batch_size}")
     
     def __call__(self, input):
         """
-        將文本轉換為嵌入向量
-        
-        Args:
-            input: 要嵌入的文本或文本列表
-        
-        Returns:
-            嵌入向量列表
+        將文本轉換為嵌入向量，支持自動降級到 OpenAI
         """
         if not input:
             return []
@@ -92,17 +76,18 @@ class GeminiEmbeddingFunction:
     
     def _process_in_batches(self, texts):
         """
-        批次處理文本嵌入，支持自動重試和降級
+        批次處理文本嵌入，支持自動重試和降級到 OpenAI
         """
         import time
         import numpy as np
+        import openai
         
         # 分批處理
         batches = [texts[i:i+self.batch_size] for i in range(0, len(texts), self.batch_size)]
         all_embeddings = []
         
         for i, batch in enumerate(batches):
-            print(f"嵌入處理：第 {i+1}/{len(batches)} 批 ({len(batch)} 條文本)")
+            logger.info(f"嵌入處理：第 {i+1}/{len(batches)} 批 ({len(batch)} 條文本)")
             
             # 嘗試使用Gemini API
             batch_embeddings = None
@@ -112,62 +97,56 @@ class GeminiEmbeddingFunction:
             # 重試邏輯
             while retry_count <= self.backoff_config["max_retries"]:
                 try:
-                    # 嘗試使用Gemini API獲取嵌入
-                    batch_embeddings = []
-                    for text in batch:
-                        # 文本預處理：裁剪長文本
-                        if len(text) > 8192:
-                            text = text[:8192]
-                            
-                        # 獲取嵌入
-                        result = genai.embed_content(
-                            model=self.model_name,
-                            content=text,
-                            task_type="retrieval_document"  # 使用retrieval_document而非semantic_similarity
-                        )
+                    if self.gemini_api_key:
+                        # 嘗試使用Gemini API獲取嵌入
+                        batch_embeddings = []
+                        for text in batch:
+                            if len(text) > 8192:
+                                text = text[:8192]
+                                
+                            result = genai.embed_content(
+                                model=self.model_name,
+                                content=text,
+                                task_type="retrieval_document"
+                            )
+                            embedding = np.array(result["embedding"])
+                            batch_embeddings.append(embedding)
                         
-                        # 提取嵌入向量
-                        embedding = np.array(result["embedding"])
-                        batch_embeddings.append(embedding)
-                    
-                    # 如果成功，跳出重試循環
-                    self.api_success += 1
-                    break
+                        break
+                    else:
+                        raise Exception("Gemini API key not available")
                 
                 except Exception as e:
                     last_error = e
                     retry_count += 1
                     
-                    # 檢查是否應該重試
                     if retry_count <= self.backoff_config["max_retries"]:
                         wait_time = self.backoff_config["initial_wait"] * (
                             self.backoff_config["backoff_factor"] ** (retry_count - 1)
                         )
-                        print(f"嵌入API錯誤: {str(e)}，等待 {wait_time:.1f} 秒後重試 ({retry_count}/{self.backoff_config['max_retries']})")
+                        logger.warning(f"Gemini嵌入API錯誤: {str(e)}，等待 {wait_time:.1f} 秒後重試")
                         time.sleep(wait_time)
                     else:
-                        print(f"達到最大重試次數，嵌入API錯誤: {str(e)}")
-                        self.api_failure += 1
+                        logger.warning(f"達到最大重試次數，切換到OpenAI嵌入")
             
-            # 如果API調用失敗，使用本地模型
-            if batch_embeddings is None:
-                print("API調用失敗，使用本地嵌入模型作為備用")
-                if self.local_model:
-                    try:
-                        batch_embeddings = self.local_model.encode(batch)
-                    except Exception as local_error:
-                        print(f"本地模型嵌入失敗: {str(local_error)}")
-                        # 使用零向量作為最後的備用選項
-                        batch_embeddings = [np.zeros(768) for _ in batch]
-                else:
-                    print("無本地模型可用，使用零向量")
-                    # 無本地模型時，使用零向量
+            # 如果Gemini API調用失敗，嘗試使用OpenAI
+            if batch_embeddings is None and self.openai_api_key:
+                try:
+                    client = openai.OpenAI(api_key=self.openai_api_key)
+                    response = client.embeddings.create(
+                        model="text-embedding-3-large",
+                        input=batch
+                    )
+                    batch_embeddings = [np.array(item.embedding) for item in response.data]
+                    logger.info("成功使用OpenAI嵌入模型")
+                except Exception as e:
+                    logger.error(f"OpenAI嵌入失敗: {str(e)}")
+                    # 使用零向量作為最後的備用選項
                     batch_embeddings = [np.zeros(768) for _ in batch]
             
-            # 添加批次結果到總結果
             all_embeddings.extend(batch_embeddings)
             
-            # 批次間添加短暫延遲，避免超過API速率限制
+            # 批次間添加短暫延遲
             if i < len(batches) - 1:
                 time.sleep(1.5)
         
@@ -177,245 +156,62 @@ class VectorStore:
     def __init__(self, force_reset=False):
         # 使用不同的目錄路徑解決版本不兼容問題
         home_dir = os.path.expanduser("~")
-        # 使用帶有版本號的新目錄名稱，避免與舊版本衝突
         self.persist_path = os.path.join(home_dir, "test_generator_vector_db_v2")
-
-        print(f"向量庫存儲路徑: {self.persist_path}")
-
+        
+        logger.info(f"向量庫存儲路徑: {self.persist_path}")
+        
         # 檢查是否需要重置向量庫
-        if force_reset and os.path.exists(self.persist_path):
-            try:
+        if force_reset:
+            self._reset_database()
+        
+        # 初始化向量庫
+        if not self._initialize_vector_store():
+            logger.error("向量庫初始化失敗，請檢查錯誤日誌")
+            raise Exception("向量庫初始化失敗")
+    
+    def _reset_database(self):
+        """重置向量庫"""
+        try:
+            if os.path.exists(self.persist_path):
                 shutil.rmtree(self.persist_path)
-                print(f"已刪除現有的向量庫目錄：{self.persist_path}")
-            except Exception as e:
-                print(f"刪除向量庫目錄時出錯：{str(e)}")
-                # 嘗試使用系統命令強制刪除
-                try:
-                    os.system(f"rm -rf {self.persist_path}")
-                    print(f"已使用系統命令強制刪除向量庫目錄：{self.persist_path}")
-                except Exception as cmd_error:
-                    print(f"強制刪除失敗：{str(cmd_error)}")
-
-        # 如果目錄不存在，則建立；否則保留舊資料
-        if not os.path.exists(self.persist_path):
+                logger.info(f"已刪除現有的向量庫目錄：{self.persist_path}")
+        except Exception as e:
+            logger.error(f"刪除向量庫目錄時出錯：{str(e)}")
             try:
-                os.makedirs(self.persist_path, exist_ok=True, mode=0o755)  # 設置明確的權限
-                print(f"創建新的持久化目錄：{self.persist_path}")
-            except Exception as e:
-                print(f"創建持久化目錄時出錯：{str(e)}")
-                # 嘗試使用系統命令創建
-                os.system(f"mkdir -p {self.persist_path} && chmod 755 {self.persist_path}")
-        else:
-            print(f"使用現有的持久化目錄：{self.persist_path}")
-
-        # 初始化策略
-        self._initialize_vector_store()
+                os.system(f"rm -rf {self.persist_path}")
+                logger.info(f"已使用系統命令強制刪除向量庫目錄")
+            except Exception as cmd_error:
+                logger.error(f"強制刪除失敗：{str(cmd_error)}")
+                raise
     
     def _initialize_vector_store(self):
-        """優化的向量存儲初始化方法，支持多種初始化策略和降級方案"""
-        success = False
-        error_messages = []
-        
-        # 檢查資料庫文件是否存在，如果存在且為空目錄但初始化失敗，可能是結構問題
-        db_file = os.path.join(self.persist_path, "chroma.sqlite3")
-        if not os.path.exists(db_file) and os.path.exists(self.persist_path) and len(os.listdir(self.persist_path)) == 0:
-            print(f"檢測到向量庫目錄存在但無數據庫文件，嘗試強制重置...")
-            try:
-                shutil.rmtree(self.persist_path)
-                os.makedirs(self.persist_path, exist_ok=True, mode=0o777)
-                print(f"已強制重置向量庫目錄: {self.persist_path}")
-            except Exception as e:
-                print(f"強制重置向量庫時出錯: {str(e)}")
-        
-        # 第一階段：嘗試使用Gemini嵌入模型初始化
+        """初始化向量庫"""
         try:
-            print("嘗試使用Gemini嵌入模型初始化向量庫...")
+            # 確保目錄存在
+            os.makedirs(self.persist_path, exist_ok=True)
+            
+            # 初始化 ChromaDB 客戶端
             self.client = chromadb.PersistentClient(path=self.persist_path)
             
-            # 使用優化過的Gemini嵌入函數
-            self.embedding_function = GeminiEmbeddingFunction(
+            # 創建嵌入函數
+            embedding_fn = GeminiEmbeddingFunction(
                 model_name=EMBEDDING_CONFIG["default_model"],
                 batch_size=EMBEDDING_CONFIG["batch_size"]
             )
             
-            # 創建或獲取集合，使用改進的索引設置
-            self.collection = self.client.get_or_create_collection(
-                name="exam_questions",
-                embedding_function=self.embedding_function,
-                metadata={
-                    "hnsw:space": "cosine",          # 使用余弦相似度
-                    "hnsw:construction_ef": 100,     # 建立索引時的擴展因子
-                    "hnsw:search_ef": 100,           # 搜索時的擴展因子
-                    "hnsw:M": 16,                    # 每個節點的最大連接數
-                    "hnsw:num_threads": 4            # 使用多線程構建索引
-                }
+            # 創建集合
+            self.collection = self.client.create_collection(
+                name="legal_questions",
+                embedding_function=embedding_fn,
+                metadata={"hnsw:space": "cosine"}
             )
-            success = True
-            print("使用Gemini嵌入模型成功初始化向量庫")
-        except Exception as e:
-            error_message = f"使用Gemini嵌入模型初始化失敗: {str(e)}"
-            print(error_message)
-            error_messages.append(error_message)
             
-            # 如果發現是數據庫結構錯誤，立即嘗試重置
-            if "no such column" in str(e) or "readonly database" in str(e):
-                print("檢測到數據庫結構錯誤，嘗試強制刪除並重建...")
-                try:
-                    # 徹底刪除目錄
-                    if os.path.exists(self.persist_path):
-                        shutil.rmtree(self.persist_path)
-                    # 使用系統命令確保完全刪除    
-                    os.system(f"rm -rf {self.persist_path}")
-                    # 重新創建目錄
-                    os.makedirs(self.persist_path, exist_ok=True, mode=0o777)
-                    # 設置寬鬆權限確保可寫
-                    os.system(f"chmod -R 777 {self.persist_path}")
-                    print(f"已強制刪除並重建向量庫目錄: {self.persist_path}")
-                    
-                    # 重新嘗試初始化
-                    try:
-                        self.client = chromadb.PersistentClient(path=self.persist_path)
-                        self.embedding_function = GeminiEmbeddingFunction(
-                            model_name=EMBEDDING_CONFIG["default_model"],
-                            batch_size=EMBEDDING_CONFIG["batch_size"]
-                        )
-                        self.collection = self.client.get_or_create_collection(
-                            name="exam_questions",
-                            embedding_function=self.embedding_function,
-                            metadata={"hnsw:space": "cosine"}
-                        )
-                        success = True
-                        print("強制重置後成功初始化向量庫")
-                        return  # 成功初始化後直接返回
-                    except Exception as reset_e:
-                        print(f"重置後仍無法初始化: {str(reset_e)}")
-                except Exception as del_e:
-                    print(f"刪除向量庫目錄時出錯: {str(del_e)}")
-        
-        # 第二階段：如果使用Gemini失敗，嘗試使用SentenceTransformer
-        if not success:
-            try:
-                print("嘗試使用SentenceTransformer嵌入模型初始化向量庫...")
-                self.client = chromadb.PersistentClient(path=self.persist_path)
-                
-                # 使用SentenceTransformer嵌入函數，添加相容層以適應新接口
-                from sentence_transformers import SentenceTransformer
-                model = SentenceTransformer(EMBEDDING_CONFIG["fallback_model"])
-                
-                # 創建一個包裝器，確保接口一致性
-                class STWrapper:
-                    def __init__(self, model):
-                        self.model = model
-                    
-                    def __call__(self, input):
-                        # 保持與新的ChromaDB接口兼容
-                        texts = input if isinstance(input, list) else [input]
-                        return self.model.encode(texts)
-                
-                self.embedding_function = STWrapper(model)
-                
-                # 創建或獲取集合，使用基本設置
-                self.collection = self.client.get_or_create_collection(
-                    name="exam_questions",
-                    embedding_function=self.embedding_function,
-                    metadata={"hnsw:space": "cosine"}  # 使用簡化設置
-                )
-                success = True
-                print("使用SentenceTransformer嵌入模型成功初始化向量庫")
-            except Exception as e:
-                error_message = f"使用SentenceTransformer初始化失敗: {str(e)}"
-                print(error_message)
-                error_messages.append(error_message)
-        
-        # 第三階段：如果持久化存儲有問題，嘗試重置數據庫
-        if not success and any(x in str(error_messages) for x in ["no such column", "readonly database", "permission denied"]):
-            try:
-                print("檢測到數據庫結構變更或權限問題，嘗試完全重置...")
-                # 強制刪除並重新創建目錄
-                if os.path.exists(self.persist_path):
-                    shutil.rmtree(self.persist_path)
-                # 使用系統命令確保完全刪除    
-                os.system(f"rm -rf {self.persist_path}")
-                # 重新創建目錄
-                os.makedirs(self.persist_path, exist_ok=True, mode=0o777)
-                # 設置寬鬆權限確保可寫
-                os.system(f"chmod -R 777 {self.persist_path}")
-                
-                # 重新嘗試初始化
-                self.client = chromadb.PersistentClient(path=self.persist_path)
-                
-                # 優先使用SentenceTransformer作為重置後的模型（更穩定）
-                from sentence_transformers import SentenceTransformer
-                model = SentenceTransformer(EMBEDDING_CONFIG["fallback_model"])
-                
-                # 創建相同的包裝器
-                class STWrapper:
-                    def __init__(self, model):
-                        self.model = model
-                    
-                    def __call__(self, input):
-                        texts = input if isinstance(input, list) else [input]
-                        return self.model.encode(texts)
-                
-                self.embedding_function = STWrapper(model)
-                
-                # 簡化設置
-                self.collection = self.client.get_or_create_collection(
-                    name="exam_questions",
-                    embedding_function=self.embedding_function,
-                    metadata={"hnsw:space": "cosine"}
-                )
-                success = True
-                print("向量庫重置後成功初始化")
-            except Exception as reset_error:
-                error_message = f"重置後初始化失敗: {str(reset_error)}"
-                print(error_message)
-                error_messages.append(error_message)
-        
-        # 第四階段：最終備用選項 - 使用內存模式
-        if not success:
-            try:
-                print("嘗試使用內存模式作為最終備用選項...")
-                self.client = chromadb.Client()  # 內存模式
-                
-                # 使用SentenceTransformer（最穩定的選項）
-                from sentence_transformers import SentenceTransformer
-                model = SentenceTransformer(EMBEDDING_CONFIG["fallback_model"])
-                
-                # 使用相同的包裝器
-                class STWrapper:
-                    def __init__(self, model):
-                        self.model = model
-                    
-                    def __call__(self, input):
-                        texts = input if isinstance(input, list) else [input]
-                        return self.model.encode(texts)
-                
-                self.embedding_function = STWrapper(model)
-                
-                # 使用基本配置
-                self.collection = self.client.get_or_create_collection(
-                    name="exam_questions",
-                    embedding_function=self.embedding_function
-                )
-                success = True
-                print("⚠️ 成功使用內存模式初始化向量庫（注意：數據不會持久化）")
-            except Exception as mem_error:
-                error_message = f"內存模式初始化失敗: {str(mem_error)}"
-                print(error_message)
-                error_messages.append(error_message)
-        
-        # 如果所有嘗試都失敗，拋出異常
-        if not success:
-            error_details = "\n".join(error_messages)
-            raise RuntimeError(f"無法初始化向量庫，所有嘗試均失敗：\n{error_details}")
-        
-        # 輸出集合大小
-        try:
-            count = self.collection.count()
-            print(f"向量庫初始化完成，當前共有 {count} 個文檔")
-        except:
-            print("向量庫初始化完成，但無法獲取文檔數量")
+            logger.info("向量庫初始化成功")
+            return True
+            
+        except Exception as e:
+            logger.error(f"初始化向量庫失敗: {str(e)}")
+            return False
 
     def add_questions(self, questions: List[Dict], exam_name: str):
         documents = []

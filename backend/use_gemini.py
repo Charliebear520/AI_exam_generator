@@ -56,15 +56,15 @@ logging.getLogger("use_gemini").setLevel(logging.WARNING)
 # 模型配置和批次處理參數
 GEMINI_MODELS = {
     "text": {
-        "default": "gemini-2.0-flash-lite",  # 使用Flash-Lite模型（更高RPM限制4000）
+        "default": "gemini-2.0-flash",  # 使用 Flash 模型
         "fallback": "gemini-1.5-flash",  # 備用模型
-        "premium": "gemini-2.5-pro-exp-03-25",  # 有條件時使用的高級模型（低RPM限制）
-        "batch_size": 25,  # 每批處理的題目數量，針對Flash模型調整
-        "rpm_limit": 4000  # 更新為Flash-Lite的RPM限制
+        "premium": "gemini-2.5-pro-exp-03-25",  # 有條件時使用的高級模型
+        "batch_size": 25,  # 每批處理的題目數量
+        "rpm_limit": 4000  # RPM 限制
     },
     "embedding": {
-        "default": "gemini-embedding-exp",
-        "fallback": "all-MiniLM-L6-v2",  # 降級到SentenceTransformer
+        "default": "gemini-2.0-flash",  # 使用 Flash 模型
+        "fallback": "text-embedding-3-large",  # 使用 OpenAI 作為備用
         "batch_size": 8,  # 嵌入模型批次大小
         "rpm_limit": 10
     }
