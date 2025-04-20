@@ -11,9 +11,14 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 import numpy as np
 import logging
+import time
 
 # 配置日誌
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 # 載入環境變數
@@ -44,10 +49,12 @@ class GeminiEmbeddingFunction:
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         
         if not self.gemini_api_key and not self.openai_api_key:
+            logger.error("未設置API密鑰，請在 .env 檔案中設定 GEMINI_API_KEY 或 OPENAI_API_KEY")
             raise ValueError("請在 .env 檔案中設定 GEMINI_API_KEY 或 OPENAI_API_KEY")
         
         if self.gemini_api_key:
             genai.configure(api_key=self.gemini_api_key)
+            logger.info(f"已配置Gemini API密鑰，前5位: {self.gemini_api_key[:5]}...")
         
         # 退避策略配置
         self.backoff_config = {
@@ -87,7 +94,7 @@ class GeminiEmbeddingFunction:
         all_embeddings = []
         
         for i, batch in enumerate(batches):
-            logger.info(f"嵌入處理：第 {i+1}/{len(batches)} 批 ({len(batch)} 條文本)")
+            logger.info(f"正在處理第 {i+1}/{len(batches)} 批文本，本批包含 {len(batch)} 條文本")
             
             # 嘗試使用Gemini API
             batch_embeddings = None
@@ -102,6 +109,7 @@ class GeminiEmbeddingFunction:
                         batch_embeddings = []
                         for text in batch:
                             if len(text) > 8192:
+                                logger.warning(f"文本長度超過8192字符，將被截斷")
                                 text = text[:8192]
                                 
                             result = genai.embed_content(
@@ -112,6 +120,7 @@ class GeminiEmbeddingFunction:
                             embedding = np.array(result["embedding"])
                             batch_embeddings.append(embedding)
                         
+                        logger.info(f"第 {i+1} 批文本嵌入成功")
                         break
                     else:
                         raise Exception("Gemini API key not available")
@@ -124,25 +133,27 @@ class GeminiEmbeddingFunction:
                         wait_time = self.backoff_config["initial_wait"] * (
                             self.backoff_config["backoff_factor"] ** (retry_count - 1)
                         )
-                        logger.warning(f"Gemini嵌入API錯誤: {str(e)}，等待 {wait_time:.1f} 秒後重試")
+                        logger.warning(f"Gemini嵌入API錯誤: {str(e)}，將在 {wait_time:.1f} 秒後重試 (第 {retry_count} 次)")
                         time.sleep(wait_time)
                     else:
-                        logger.warning(f"達到最大重試次數，切換到OpenAI嵌入")
+                        logger.warning(f"達到最大重試次數 ({self.backoff_config['max_retries']})，將切換到OpenAI嵌入")
             
             # 如果Gemini API調用失敗，嘗試使用OpenAI
             if batch_embeddings is None and self.openai_api_key:
                 try:
+                    logger.info("正在使用OpenAI嵌入模型作為備用")
                     client = openai.OpenAI(api_key=self.openai_api_key)
                     response = client.embeddings.create(
                         model="text-embedding-3-large",
                         input=batch
                     )
                     batch_embeddings = [np.array(item.embedding) for item in response.data]
-                    logger.info("成功使用OpenAI嵌入模型")
+                    logger.info("OpenAI嵌入模型處理成功")
                 except Exception as e:
                     logger.error(f"OpenAI嵌入失敗: {str(e)}")
                     # 使用零向量作為最後的備用選項
                     batch_embeddings = [np.zeros(768) for _ in batch]
+                    logger.warning("使用零向量作為最後的備用選項")
             
             all_embeddings.extend(batch_embeddings)
             
@@ -173,16 +184,25 @@ class VectorStore:
         """重置向量庫"""
         try:
             if os.path.exists(self.persist_path):
-                shutil.rmtree(self.persist_path)
-                logger.info(f"已刪除現有的向量庫目錄：{self.persist_path}")
+                # 先嘗試正常刪除
+                try:
+                    shutil.rmtree(self.persist_path)
+                    logger.info(f"已刪除現有的向量庫目錄：{self.persist_path}")
+                except Exception as e:
+                    logger.warning(f"正常刪除失敗，嘗試強制刪除：{str(e)}")
+                    # 如果正常刪除失敗，嘗試使用系統命令強制刪除
+                    os.system(f"rm -rf {self.persist_path}")
+                    logger.info("已使用系統命令強制刪除向量庫目錄")
+                
+                # 確保目錄被完全刪除
+                if os.path.exists(self.persist_path):
+                    raise Exception("無法完全刪除向量庫目錄")
+                
+                # 等待一小段時間確保文件系統更新
+                time.sleep(1)
         except Exception as e:
-            logger.error(f"刪除向量庫目錄時出錯：{str(e)}")
-            try:
-                os.system(f"rm -rf {self.persist_path}")
-                logger.info(f"已使用系統命令強制刪除向量庫目錄")
-            except Exception as cmd_error:
-                logger.error(f"強制刪除失敗：{str(cmd_error)}")
-                raise
+            logger.error(f"重置向量庫時發生錯誤：{str(e)}")
+            raise
     
     def _initialize_vector_store(self):
         """初始化向量庫"""
@@ -192,6 +212,18 @@ class VectorStore:
             
             # 初始化 ChromaDB 客戶端
             self.client = chromadb.PersistentClient(path=self.persist_path)
+            
+            # 檢查集合是否已存在
+            try:
+                existing_collections = self.client.list_collections()
+                for collection in existing_collections:
+                    if collection.name == "legal_questions":
+                        logger.info("發現已存在的集合，正在刪除...")
+                        self.client.delete_collection("legal_questions")
+                        logger.info("已刪除現有集合")
+                        break
+            except Exception as e:
+                logger.warning(f"檢查現有集合時發生錯誤：{str(e)}")
             
             # 創建嵌入函數
             embedding_fn = GeminiEmbeddingFunction(

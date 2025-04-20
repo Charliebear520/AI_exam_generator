@@ -11,6 +11,7 @@ import {
   Alert,
   Select,
   Tooltip,
+  Collapse,
 } from "antd";
 import {
   BarChartOutlined,
@@ -21,11 +22,12 @@ import "./MetadataStatistics.css";
 
 const { TabPane } = Tabs;
 const { Option } = Select;
+const { Panel } = Collapse;
 
 const MetadataStatistics = () => {
   const [activeTab, setActiveTab] = useState("exam_point");
   const [loading, setLoading] = useState(false);
-  const [data, setData] = useState({ items: [], total_questions: 0 });
+  const [data, setData] = useState({ stats: [], total_questions: 0 });
   const [limit, setLimit] = useState(20);
   const [minCount, setMinCount] = useState(2);
   const [error, setError] = useState(null);
@@ -35,7 +37,7 @@ const MetadataStatistics = () => {
     setError(null);
     try {
       const response = await fetch(
-        `http://localhost:8000/statistics/metadata?metadata_type=${type}&limit=${limit}&min_count=${minCount}`
+        `http://localhost:8000/statistics/metadata_by_year?metadata_type=${type}&limit=${limit}&min_count=${minCount}`
       );
 
       if (!response.ok) {
@@ -67,6 +69,19 @@ const MetadataStatistics = () => {
     fetchStatistics();
   };
 
+  const getTypeLabel = (type) => {
+    switch (type) {
+      case "exam_point":
+        return "考點";
+      case "keyword":
+        return "關鍵詞";
+      case "law_reference":
+        return "法條引用";
+      default:
+        return "";
+    }
+  };
+
   const columns = [
     {
       title: "序號",
@@ -76,12 +91,7 @@ const MetadataStatistics = () => {
       width: 70,
     },
     {
-      title:
-        activeTab === "exam_point"
-          ? "考點"
-          : activeTab === "keyword"
-          ? "關鍵詞"
-          : "法條引用",
+      title: getTypeLabel(activeTab),
       dataIndex: "item",
       key: "item",
     },
@@ -96,14 +106,43 @@ const MetadataStatistics = () => {
       title: "佔比",
       dataIndex: "percentage",
       key: "percentage",
-      render: (percentage) => <span>{percentage}%</span>,
+      render: (_, record) => {
+        // 直接使用該項目的出現次數
+        const percentage = (
+          (record.count / data.total_questions) *
+          100
+        ).toFixed(2);
+        return <span>{percentage}%</span>;
+      },
       width: 90,
     },
     {
-      title: "比例圖",
-      dataIndex: "percentage",
-      key: "visualization",
-      render: (percentage) => <Progress percent={percentage} size="small" />,
+      title: "出現年份",
+      dataIndex: "years",
+      key: "years",
+      render: (_, record) => {
+        // 從所有題目中提取該項目出現的年份
+        const years = new Set();
+        data.stats.forEach((yearData) => {
+          yearData.items.forEach((item) => {
+            if (item.item === record.item) {
+              years.add(yearData.year);
+            }
+          });
+        });
+
+        return (
+          <div className="year-tags">
+            {Array.from(years)
+              .sort()
+              .map((year) => (
+                <span key={year} className="year-tag">
+                  {year}年
+                </span>
+              ))}
+          </div>
+        );
+      },
     },
   ];
 
@@ -163,19 +202,13 @@ const MetadataStatistics = () => {
         )}
 
         <Spin spinning={loading}>
-          {data.items && data.items.length > 0 ? (
+          {data.stats && data.stats.length > 0 ? (
             <>
               <div className="statistics-summary">
-                總共分析 {data.total_questions} 道題目，發現{" "}
-                {data.total_distinct} 個不同的
-                {activeTab === "exam_point"
-                  ? "考點"
-                  : activeTab === "keyword"
-                  ? "關鍵詞"
-                  : "法條引用"}
+                總共分析 {data.total_questions} 道題目
               </div>
               <Table
-                dataSource={data.items}
+                dataSource={data.stats.flatMap((yearData) => yearData.items)}
                 columns={columns}
                 rowKey={(record) => record.item}
                 pagination={{ pageSize: 10 }}

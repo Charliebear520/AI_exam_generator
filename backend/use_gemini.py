@@ -25,32 +25,150 @@ except ImportError:
     OPENAI_AVAILABLE = False
     print("OpenAI庫未安裝，將不能使用OpenAI功能")
 
-# 載入 .env 檔案中的環境變數
+# 配置日誌
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# 設置特定模塊的日誌級別
+logging.getLogger("google.generativeai").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+
+# 載入環境變數
 load_dotenv()
 
-# 全局變量，控制當前上傳過程中使用的API
-# 默認使用Gemini API
-USE_OPENAI_FOR_CURRENT_BATCH = False
+# 模型配置
+MODEL_CONFIG = {
+    "default_model": "gemini-1.5-pro",  # 默認模型
+    "fallback_model": "gpt-4-turbo-preview",  # OpenAI 備用模型
+    "batch_size": 8,  # 批量大小
+    "max_tokens": 4096,  # 最大輸出token數
+    "temperature": 0.7,  # 溫度參數
+    "safety_settings": {  # 安全設置
+        "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+        "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+        "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+        "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE"
+    }
+}
 
-# 設定 Google API 金鑰 - 尝试多个可能的环境變數名
-api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-if not api_key:
-    raise ValueError("請在 .env 檔案中設定 GEMINI_API_KEY 或 GOOGLE_API_KEY")
+class GeminiClient:
+    def __init__(self, model_name="gemini-1.5-pro", batch_size=8):
+        """
+        初始化Gemini客戶端，支持配置和自動降級
+        
+        Args:
+            model_name: Gemini模型名稱
+            batch_size: 批處理大小
+        """
+        self.model_name = model_name
+        self.batch_size = batch_size
+        
+        # 獲取API密鑰
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        
+        if not self.gemini_api_key and not self.openai_api_key:
+            logger.error("未設置API密鑰，請在 .env 檔案中設定 GEMINI_API_KEY 或 OPENAI_API_KEY")
+            raise ValueError("請在 .env 檔案中設定 GEMINI_API_KEY 或 OPENAI_API_KEY")
+        
+        if self.gemini_api_key:
+            try:
+                genai.configure(api_key=self.gemini_api_key)
+                logger.info(f"已配置Gemini API密鑰，前5位: {self.gemini_api_key[:5]}...")
+            except Exception as e:
+                logger.error(f"Gemini API配置失敗: {str(e)}")
+                raise
+        
+        # 退避策略配置
+        self.backoff_config = {
+            "initial_wait": 1.0,   # 初始等待時間(秒)
+            "max_retries": 3,      # 最大重試次數
+            "backoff_factor": 2.0  # 退避倍數
+        }
+        
+        logger.info(f"模型 '{model_name}' 初始化成功，批次大小：{batch_size}")
 
-# 打印API密鑰的前5个字符和長度，用于调试
-print(f"API密鑰前5个字符: {api_key[:5] if api_key else 'None'}, 長度: {len(api_key) if api_key else 0}")
-
-try:
-    genai.configure(api_key=api_key)
-    print("Gemini API配置成功")
-except Exception as e:
-    print(f"Gemini API配置失败: {str(e)}")
-    traceback.print_exc()
+    def generate_response(self, prompt, max_tokens=4096, temperature=0.7):
+        """
+        生成回應，支持自動重試和降級到 OpenAI
+        
+        Args:
+            prompt: 輸入提示
+            max_tokens: 最大輸出token數
+            temperature: 溫度參數
+            
+        Returns:
+            str: 生成的回應文本
+        """
+        import time
+        import openai
+        
+        retry_count = 0
+        last_error = None
+        
+        # 重試邏輯
+        while retry_count <= self.backoff_config["max_retries"]:
+            try:
+                if self.gemini_api_key:
+                    # 嘗試使用Gemini API生成回應
+                    model = genai.GenerativeModel(
+                        self.model_name,
+                        generation_config=genai.types.GenerationConfig(
+                            max_output_tokens=max_tokens,
+                            temperature=temperature
+                        ),
+                        safety_settings=MODEL_CONFIG["safety_settings"]
+                    )
+                    response = model.generate_content(prompt)
+                    
+                    # 檢查回應是否被安全過濾
+                    if response.prompt_feedback and response.prompt_feedback.block_reason:
+                        logger.warning(f"回應被安全過濾: {response.prompt_feedback.block_reason}")
+                        raise Exception(f"安全過濾: {response.prompt_feedback.block_reason}")
+                    
+                    logger.info("Gemini模型回應生成成功")
+                    return response.text
+                else:
+                    raise Exception("Gemini API key not available")
+                
+            except Exception as e:
+                last_error = e
+                retry_count += 1
+                
+                if retry_count <= self.backoff_config["max_retries"]:
+                    wait_time = self.backoff_config["initial_wait"] * (
+                        self.backoff_config["backoff_factor"] ** (retry_count - 1)
+                    )
+                    logger.warning(f"Gemini API錯誤: {str(e)}，將在 {wait_time:.1f} 秒後重試 (第 {retry_count} 次)")
+                    time.sleep(wait_time)
+                else:
+                    logger.warning(f"達到最大重試次數 ({self.backoff_config['max_retries']})，將切換到OpenAI模型")
+        
+        # 如果Gemini API調用失敗，嘗試使用OpenAI
+        if self.openai_api_key:
+            try:
+                logger.info("正在使用OpenAI模型作為備用")
+                client = openai.OpenAI(api_key=self.openai_api_key)
+                response = client.chat.completions.create(
+                    model=MODEL_CONFIG["fallback_model"],
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+                logger.info("OpenAI模型回應生成成功")
+                return response.choices[0].message.content
+            except Exception as e:
+                logger.error(f"OpenAI模型失敗: {str(e)}")
+                raise
+        
+        # 如果所有嘗試都失敗，拋出最後的錯誤
+        raise last_error or Exception("所有API調用都失敗了")
 
 # 設置全局日誌級別為WARNING或ERROR，減少INFO級別的輸出
-logging.basicConfig(level=logging.WARNING)
-
-# 或者針對特定模塊設置日誌級別
 logging.getLogger("use_gemini").setLevel(logging.WARNING)
 
 # 模型配置和批次處理參數
@@ -852,7 +970,7 @@ def retrieve_online_questions(keyword: str, num_questions: int) -> List[Dict]:
         # 清除 Markdown code block 標記，提取 JSON 部分
         import re, json
         def clean_json_text(text):
-            text = re.sub(r'```(?:json)?\s*|```', '', text).strip()
+            text = re.sub(r'```(?:json)?\s*|\s*```', '', text).strip()
             match = re.search(r'({.*})', text, re.DOTALL)
             return match.group(1) if match else text
         cleaned_text = clean_json_text(result_text)

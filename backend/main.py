@@ -964,5 +964,98 @@ async def admin_split_exam_point(exam_point: str = Form(...)):
 async def upload_form():
     return {"message": "請使用POST方法上傳文件"}
 
+@app.get("/statistics/metadata_by_year")
+async def get_metadata_statistics_by_year(
+    metadata_type: str = Query(..., description="要統計的元數據類型: exam_point, keyword, law_reference"),
+    limit: int = Query(20, description="返回結果數量上限"),
+    min_count: int = Query(1, description="最小出現次數")
+):
+    """
+    獲取元數據按年份的統計信息
+    """
+    try:
+        # 從向量存儲中獲取所有題目
+        all_questions = vector_store.collection.get()
+        if not all_questions or "metadatas" not in all_questions:
+            return {"stats": [], "total_questions": 0, "metadata_type": metadata_type}
+            
+        total_questions = len(all_questions["metadatas"])
+        
+        # 初始化計數器
+        year_counter = {}
+        
+        for metadata in all_questions["metadatas"]:
+            # 從考試名稱中提取年份
+            exam_name = metadata.get("exam_name", "")
+            year = exam_name[:3] if exam_name else "未知"  # 假設年份是考試名稱的前3個字符
+            
+            if metadata_type == "exam_point":
+                item = metadata.get("exam_point", "")
+                if item and len(item) > 0:
+                    if year not in year_counter:
+                        year_counter[year] = {}
+                    year_counter[year][item] = year_counter[year].get(item, 0) + 1
+            
+            elif metadata_type == "keyword":
+                try:
+                    keywords = json.loads(metadata.get("keywords", "[]"))
+                    if isinstance(keywords, list):
+                        for kw in keywords:
+                            if kw and len(kw) > 0:
+                                if year not in year_counter:
+                                    year_counter[year] = {}
+                                year_counter[year][kw] = year_counter[year].get(kw, 0) + 1
+                except:
+                    continue
+            
+            elif metadata_type == "law_reference":
+                try:
+                    refs = json.loads(metadata.get("law_references", "[]"))
+                    if isinstance(refs, list):
+                        for ref in refs:
+                            if ref and len(ref) > 0:
+                                if year not in year_counter:
+                                    year_counter[year] = {}
+                                year_counter[year][ref] = year_counter[year].get(ref, 0) + 1
+                except:
+                    continue
+        
+        # 處理統計結果
+        stats = []
+        for year, items in year_counter.items():
+            # 過濾低於最小出現次數的項目
+            filtered_items = {k: v for k, v in items.items() if v >= min_count}
+            
+            # 按出現頻率排序
+            sorted_items = sorted(filtered_items.items(), key=lambda x: x[1], reverse=True)
+            
+            # 限制返回數量
+            sorted_items = sorted_items[:limit]
+            
+            # 計算百分比
+            year_stats = []
+            for item, count in sorted_items:
+                year_stats.append({
+                    "item": item,
+                    "count": count,
+                    "percentage": round(count / total_questions * 100, 2)
+                })
+            
+            stats.append({
+                "year": year,
+                "items": year_stats,
+                "total_items": len(filtered_items)
+            })
+        
+        return {
+            "stats": stats,
+            "total_questions": total_questions,
+            "metadata_type": metadata_type
+        }
+        
+    except Exception as e:
+        print(f"獲取按年份統計數據時發生錯誤: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"獲取按年份統計數據時發生錯誤: {str(e)}")
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
